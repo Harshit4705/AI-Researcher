@@ -8,3 +8,16 @@ wheels/
 
 # Virtual environments
 .venv
+venv/
+
+# Environment variables (SENSITIVE)
+.env*
+
+# FAISS indexes (Large/Specific)
+faiss_indexes/
+
+# Local data/PDFs
+*.pdf
+*.zip
+*.log
+*.mp4

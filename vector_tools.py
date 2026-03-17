@@ -1,66 +1,113 @@
-# vector_tools.py
-
 from __future__ import annotations
 
 import os
+import json
+import shutil
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 from langchain_community.vectorstores.faiss import FAISS
 from langchain_core.documents import Document
 from langchain.tools import tool
-from langchain_huggingface import HuggingFaceEmbeddings  # from langchain-huggingface [web:167]
+from langchain_huggingface import HuggingFaceEmbeddings
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# ---------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------
-
 FAISS_INDEX_DIR = os.getenv("FAISS_INDEX_DIR", "faiss_indexes")
+EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-small-en-v1.5")
 
-# Free local embedding model (runs via sentence-transformers, no API key). [web:166][web:157]
-EMBEDDING_MODEL_NAME = os.getenv(
-    "EMBEDDING_MODEL_NAME",
-    "BAAI/bge-small-en-v1.5",
-)
+# ─────────────────────────────────────────────
+# Lazy loaders
+# ─────────────────────────────────────────────
 
-logger.info("Loading embedding model: %s", EMBEDDING_MODEL_NAME)
-EMBEDDINGS = HuggingFaceEmbeddings(
-    model_name=EMBEDDING_MODEL_NAME,
-    model_kwargs={"device": "cpu"},
-    encode_kwargs={"normalize_embeddings": True},  # recommended for BGE. [web:166]
-)
+_EMBEDDINGS = None
+_RERANKER = None
 
 
-# ---------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------
+def get_embeddings() -> HuggingFaceEmbeddings:
+    global _EMBEDDINGS
+    if _EMBEDDINGS is None:
+        logger.info("Loading embedding model: %s", EMBEDDING_MODEL_NAME)
+        _EMBEDDINGS = HuggingFaceEmbeddings(
+            model_name=EMBEDDING_MODEL_NAME,
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True},
+        )
+        logger.info("Embedding model loaded.")
+    return _EMBEDDINGS
+
+
+def get_reranker():
+    global _RERANKER
+    if _RERANKER is None:
+        try:
+            from sentence_transformers import CrossEncoder
+            logger.info("Loading reranker model...")
+            _RERANKER = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+            logger.info("Reranker loaded.")
+        except Exception as exc:
+            logger.warning("Reranker not available: %s. Skipping reranking.", exc)
+            _RERANKER = False  # Mark as unavailable
+    return _RERANKER if _RERANKER is not False else None
+
+
+# ─────────────────────────────────────────────
+# Reranking
+# ─────────────────────────────────────────────
+
+def rerank_chunks(query: str, chunks: List[Dict[str, Any]], top_k: int = 8) -> List[Dict[str, Any]]:
+    """
+    Rerank chunks using a cross-encoder for higher relevance precision.
+    Falls back to original order if reranker is unavailable.
+    """
+    if not chunks:
+        return chunks
+
+    reranker = get_reranker()
+    if reranker is None:
+        logger.info("Reranker unavailable — returning top %d chunks as-is", top_k)
+        return chunks[:top_k]
+
+    try:
+        pairs = [(query, c.get("content", "")) for c in chunks]
+        scores = reranker.predict(pairs)
+        ranked = sorted(zip(scores, chunks), key=lambda x: x[0], reverse=True)
+        result = [c for _, c in ranked[:top_k]]
+        logger.info("Reranked %d → %d chunks", len(chunks), len(result))
+        return result
+    except Exception as exc:
+        logger.warning("Reranking failed: %s", exc)
+        return chunks[:top_k]
+
+
+# ─────────────────────────────────────────────
+# FAISS helpers
+# ─────────────────────────────────────────────
 
 def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
 def _project_index_path(project_id: str) -> str:
-    return os.path.join(FAISS_INDEX_DIR, f"project_{project_id}")
+    safe_id = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in project_id)
+    return os.path.join(FAISS_INDEX_DIR, f"project_{safe_id}")
 
 
-def _load_faiss_for_project(project_id: str) -> FAISS | None:
-    """
-    Load FAISS index for a project if it exists; otherwise return None. [web:37][web:38]
-    """
+def _load_faiss_for_project(project_id: str) -> Optional[FAISS]:
     index_path = _project_index_path(project_id)
     if not os.path.isdir(index_path):
         return None
-
     try:
         vs = FAISS.load_local(
             index_path,
-            EMBEDDINGS,
+            get_embeddings(),
             allow_dangerous_deserialization=True,
         )
-        logger.debug("Loaded existing FAISS index at %s", index_path)
         return vs
     except Exception as exc:
         logger.warning("Failed to load FAISS index for project %s: %s", project_id, exc)
@@ -68,13 +115,9 @@ def _load_faiss_for_project(project_id: str) -> FAISS | None:
 
 
 def _save_faiss_for_project(project_id: str, vs: FAISS) -> None:
-    """
-    Persist FAISS index for a project to disk. [web:37][web:38]
-    """
     index_path = _project_index_path(project_id)
     _ensure_dir(index_path)
     vs.save_local(index_path)
-    logger.debug("Saved FAISS index for project %s to %s", project_id, index_path)
 
 
 def _chunks_to_documents(
@@ -82,31 +125,79 @@ def _chunks_to_documents(
     paper_id: str,
     chunks: List[Dict[str, Any]],
 ) -> List[Document]:
-    """
-    Convert chunk dicts (from read_pdf_tool) into LangChain Documents. [web:35][web:153]
-    """
     docs: List[Document] = []
     for ch in chunks:
         content = (ch.get("content") or "").strip()
         if not content:
             continue
-
         md = dict(ch.get("metadata") or {})
-        md.update(
-            {
-                "project_id": str(project_id),
-                "paper_id": str(paper_id),
-                "page": ch.get("page"),
-                "source": ch.get("source"),
-            }
-        )
+        md.update({
+            "project_id": str(project_id),
+            "paper_id": str(paper_id),
+            "page": ch.get("page"),
+            "source": ch.get("source"),
+        })
         docs.append(Document(page_content=content, metadata=md))
     return docs
 
 
-# ---------------------------------------------------------------------
+# ─────────────────────────────────────────────
+# Paper metadata JSON sidecar
+# ─────────────────────────────────────────────
+
+def save_paper_metadata(project_id: str, paper_id: str, metadata: dict) -> None:
+    """Save paper metadata to a JSON sidecar file for fast registry lookups."""
+    index_path = _project_index_path(project_id)
+    _ensure_dir(index_path)
+    meta_file = os.path.join(index_path, "papers.json")
+
+    existing: Dict[str, Any] = {}
+    if os.path.exists(meta_file):
+        try:
+            with open(meta_file, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except Exception:
+            existing = {}
+
+    existing[paper_id] = metadata
+    with open(meta_file, "w", encoding="utf-8") as f:
+        json.dump(existing, f, indent=2, ensure_ascii=False)
+    logger.info("Saved metadata for paper '%s' in project '%s'", paper_id, project_id)
+
+
+def load_all_paper_metadata(project_id: str) -> Dict[str, Any]:
+    """Load all paper metadata from the JSON sidecar file."""
+    index_path = _project_index_path(project_id)
+    meta_file = os.path.join(index_path, "papers.json")
+    if not os.path.exists(meta_file):
+        return {}
+    try:
+        with open(meta_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as exc:
+        logger.warning("Could not load paper metadata: %s", exc)
+        return {}
+
+
+def delete_paper_metadata(project_id: str, paper_id: str) -> None:
+    """Remove a paper's entry from the metadata sidecar."""
+    index_path = _project_index_path(project_id)
+    meta_file = os.path.join(index_path, "papers.json")
+    if not os.path.exists(meta_file):
+        return
+    try:
+        with open(meta_file, "r", encoding="utf-8") as f:
+            existing = json.load(f)
+        existing.pop(paper_id, None)
+        with open(meta_file, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2, ensure_ascii=False)
+    except Exception as exc:
+        logger.warning("Could not delete metadata for paper %s: %s", paper_id, exc)
+
+
+# ─────────────────────────────────────────────
 # LangChain tools
-# ---------------------------------------------------------------------
+# ─────────────────────────────────────────────
 
 @tool("upsert_project_paper_chunks")
 def upsert_project_paper_chunks(
@@ -115,137 +206,124 @@ def upsert_project_paper_chunks(
     chunks: List[Dict[str, Any]],
 ) -> str:
     """
-    Index / update text chunks for a given project and paper in a FAISS vector store.
-
-    Args:
-        project_id: ID of the research project.
-        paper_id: ID of the paper within that project.
-        chunks: List of dicts from read_pdf_tool:
-            - content (str)
-            - page (int, optional)
-            - source (str)
-            - metadata (dict)
-
-    Returns:
-        Status message.
+    Index paper chunks into FAISS. Removes old chunks for same paper
+    first to prevent duplicates on re-import.
     """
     if not chunks:
-        return f"No chunks provided for paper {paper_id} in project {project_id}."
+        return f"No chunks provided for paper '{paper_id}'."
 
-    docs = _chunks_to_documents(project_id, paper_id, chunks)
+    new_docs = _chunks_to_documents(project_id, paper_id, chunks)
+    if not new_docs:
+        return f"All chunks were empty for paper '{paper_id}'."
 
     vs = _load_faiss_for_project(project_id)
-    if vs is None:
-        logger.info("Creating new FAISS index for project %s", project_id)
-        vs = FAISS.from_documents(docs, EMBEDDINGS)  # builds index with local BGE embeddings. [web:38][web:166]
+
+    if vs is not None:
+        existing_docs = list(vs.docstore._dict.values())
+        filtered = [d for d in existing_docs if d.metadata.get("paper_id") != paper_id]
+        all_docs = filtered + new_docs
+        vs = FAISS.from_documents(all_docs, get_embeddings())
     else:
-        logger.info("Adding documents to existing FAISS index for project %s", project_id)
-        vs.add_documents(docs)
+        vs = FAISS.from_documents(new_docs, get_embeddings())
 
     _save_faiss_for_project(project_id, vs)
 
-    msg = f"Indexed {len(docs)} chunks for paper {paper_id} in project {project_id}."
-    logger.info(msg)
-    return msg
+    # Save title/arxiv metadata to sidecar from first chunk
+    if new_docs:
+        first_md = new_docs[0].metadata
+        save_paper_metadata(project_id, paper_id, {
+            "paper_id": paper_id,
+            "title": first_md.get("title") or paper_id,
+            "arxiv_id": first_md.get("arxiv_id"),
+            "pdf_url": first_md.get("pdf_url"),
+            "source": first_md.get("source"),
+        })
+
+    return f"Indexed {len(new_docs)} chunks for paper '{paper_id}' in project '{project_id}'."
 
 
 @tool("query_project_papers")
 def query_project_papers(
     project_id: str,
     query: str,
+    top_k: int = 8,
+) -> List[Dict[str, Any]]:
+    """Retrieve relevant chunks across ALL papers in a project."""
+    if not query.strip():
+        raise ValueError("query must be non-empty")
+
+    top_k = max(1, min(top_k, 30))
+    vs = _load_faiss_for_project(project_id)
+    if vs is None:
+        return []
+
+    docs = vs.similarity_search(query, k=top_k)
+    return [{"content": doc.page_content, "metadata": dict(doc.metadata or {})} for doc in docs]
+
+
+@tool("query_specific_paper")
+def query_specific_paper(
+    project_id: str,
+    paper_id: str,
+    query: str,
     top_k: int = 5,
 ) -> List[Dict[str, Any]]:
     """
-    Retrieve the most relevant chunks for a question from a project's papers.
-
-    Args:
-        project_id: ID of the project.
-        query: Natural language query.
-        top_k: Number of chunks to return.
-
-    Returns:
-        List of dicts:
-        - content: text
-        - metadata: includes project_id, paper_id, page, source
+    Retrieve relevant chunks from ONE specific paper only.
+    Essential for multi-paper projects.
     """
-    if not query or not query.strip():
-        raise ValueError("query must be a non-empty string")
+    if not query.strip():
+        raise ValueError("query must be non-empty")
 
+    top_k = max(1, min(top_k, 20))
     vs = _load_faiss_for_project(project_id)
     if vs is None:
-        logger.warning("No FAISS index found for project %s", project_id)
         return []
 
-    docs = vs.similarity_search(query, k=top_k)  # FAISS + BGE embeddings for similarity search. [web:37][web:166]
+    # Fetch wider pool then filter by paper_id (FAISS has no native metadata filter)
+    fetch_k = min(top_k * 15, 150)
+    all_docs = vs.similarity_search(query, k=fetch_k)
+    filtered = [d for d in all_docs if d.metadata.get("paper_id") == paper_id]
 
-    results: List[Dict[str, Any]] = []
-    for doc in docs:
-        results.append(
-            {
-                "content": doc.page_content,
-                "metadata": dict(doc.metadata or {}),
-            }
-        )
-    logger.info(
-        "Retrieved %d chunks for project %s with query %r",
-        len(results),
-        project_id,
-        query,
-    )
-    return results
+    return [
+        {"content": doc.page_content, "metadata": dict(doc.metadata or {})}
+        for doc in filtered[:top_k]
+    ]
 
 
-# ---------------------------------------------------------------------
-# Simple CLI test
-# ---------------------------------------------------------------------
+@tool("remove_paper_from_project")
+def remove_paper_from_project(project_id: str, paper_id: str) -> str:
+    """Remove all chunks of a specific paper and rebuild the index."""
+    vs = _load_faiss_for_project(project_id)
+    if vs is None:
+        return f"No index found for project '{project_id}'."
 
-if __name__ == "__main__":
-    """
-    Manual test in uv project:
+    all_docs = list(vs.docstore._dict.values())
+    remaining = [d for d in all_docs if d.metadata.get("paper_id") != paper_id]
 
-    1. Run `uv add ...` as shown in README / above.
-    2. Place 'sample.pdf' in project root.
-    3. Run: `uv run python vector_tools.py`
-    """
-    import json
-    from read_pdf import _read_pdf_impl
+    if len(remaining) == len(all_docs):
+        return f"Paper '{paper_id}' not found in project '{project_id}'."
 
-    logging.basicConfig(level=logging.INFO)
+    removed = len(all_docs) - len(remaining)
+    index_path = _project_index_path(project_id)
 
-    project_id = "demo_project"
-    paper_id = "sample_paper"
-    pdf_path = "sample.pdf"
+    if not remaining:
+        shutil.rmtree(index_path, ignore_errors=True)
+        delete_paper_metadata(project_id, paper_id)
+        return f"Removed '{paper_id}' ({removed} chunks). Index is now empty."
 
-    if not os.path.exists(pdf_path):
-        print(f"Place a test PDF at: {pdf_path}")
-        raise SystemExit(1)
+    new_vs = FAISS.from_documents(remaining, get_embeddings())
+    _save_faiss_for_project(project_id, new_vs)
+    delete_paper_metadata(project_id, paper_id)
 
-    print(f"Reading PDF: {pdf_path}")
-    chunks = _read_pdf_impl(pdf_path, chunk_size=800, chunk_overlap=100)
-    print(f"Got {len(chunks)} chunks; indexing into FAISS with local BGE embeddings...")
+    return f"Removed '{paper_id}' ({removed} chunks). {len(remaining)} chunks remain."
 
-    msg = upsert_project_paper_chunks.invoke(
-        {
-            "project_id": project_id,
-            "paper_id": paper_id,
-            "chunks": chunks,
-        }
-    )
-    print(msg)
 
-    question = "What is the main contribution of this paper?"
-    print(f"\nQuerying with: {question!r}")
-    hits = query_project_papers.invoke(
-        {
-            "project_id": project_id,
-            "query": question,
-            "top_k": 3,
-        }
-    )
-
-    print("\nTop chunks:")
-    for i, hit in enumerate(hits, start=1):
-        print("-" * 80)
-        print(f"Hit {i}")
-        print("Metadata:", json.dumps(hit["metadata"], indent=2))
-        print(hit["content"][:400], "...")
+@tool("list_project_papers")
+def list_project_papers(project_id: str) -> List[str]:
+    """List all unique paper IDs currently indexed in a project."""
+    vs = _load_faiss_for_project(project_id)
+    if vs is None:
+        return []
+    all_docs = list(vs.docstore._dict.values())
+    return sorted({d.metadata.get("paper_id") for d in all_docs if d.metadata.get("paper_id")})

@@ -1,5 +1,3 @@
-# read_pdf.py
-
 from __future__ import annotations
 
 import os
@@ -14,19 +12,18 @@ from langchain_core.tools import tool
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# Reasonable defaults for RAG over papers.
-DEFAULT_CHUNK_SIZE = 1000
-DEFAULT_CHUNK_OVERLAP = 150
+# Improved defaults — bigger chunks with more overlap
+# preserves more context per chunk and respects paragraph boundaries
+DEFAULT_CHUNK_SIZE = 1200
+DEFAULT_CHUNK_OVERLAP = 200
 
+# Separators ordered by priority — paragraph > sentence > word
+# This ensures chunks break at natural boundaries not mid-sentence
+SEPARATORS = ["\n\n", "\n", ". ", "! ", "? ", "; ", " ", ""]
 
-# ---------------------------------------------------------------------
-# Data model
-# ---------------------------------------------------------------------
 
 @dataclass
 class PDFChunk:
-    """Lightweight representation of a chunk from a PDF."""
-
     content: str
     page: Optional[int]
     source: str
@@ -36,32 +33,11 @@ class PDFChunk:
         return asdict(self)
 
 
-# ---------------------------------------------------------------------
-# Core implementation
-# ---------------------------------------------------------------------
-
 def _read_pdf_impl(
     file_path: str,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
 ) -> List[Dict[str, Any]]:
-    """
-    Internal implementation: read a PDF and split it into chunks.
-
-    Parameters
-    ----------
-    file_path : str
-        Path to the PDF file on disk.
-    chunk_size : int
-        Maximum characters per chunk (approx; good range 800–1500).
-    chunk_overlap : int
-        Overlap between adjacent chunks to preserve context.
-
-    Returns
-    -------
-    List[Dict[str, Any]]
-        Each dict has: content, page, source, metadata.
-    """
     file_path = os.path.abspath(file_path)
 
     if not os.path.exists(file_path):
@@ -70,45 +46,56 @@ def _read_pdf_impl(
     if not file_path.lower().endswith(".pdf"):
         raise ValueError(f"Expected a .pdf file, got: {file_path}")
 
+    if chunk_size <= 0:
+        raise ValueError(f"chunk_size must be positive, got: {chunk_size}")
+    if chunk_overlap < 0:
+        raise ValueError(f"chunk_overlap must be non-negative, got: {chunk_overlap}")
+    if chunk_overlap >= chunk_size:
+        logger.warning(
+            "chunk_overlap (%d) >= chunk_size (%d); clamping to chunk_size // 5",
+            chunk_overlap, chunk_size,
+        )
+        chunk_overlap = chunk_size // 5
+
     logger.info("Loading PDF: %s", file_path)
 
-    # Load pages as LangChain Documents. [web:18]
     loader = PyPDFLoader(file_path)
-    documents = loader.load()  # one Document per page typically. [web:18]
+    try:
+        documents = loader.load()
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load PDF '{file_path}': {exc}") from exc
 
-    # Split into overlapping chunks using RecursiveCharacterTextSplitter. [web:13][web:15]
+    if not documents:
+        logger.warning("PyPDFLoader returned no pages for: %s", file_path)
+        return []
+
+    # Improved splitter — respects paragraph/sentence boundaries
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
+        separators=SEPARATORS,
+        length_function=len,
+        is_separator_regex=False,
     )
+
     split_docs = splitter.split_documents(documents)
 
     chunks: List[PDFChunk] = []
     for doc in split_docs:
         text = (doc.page_content or "").strip()
-        if not text:
+        if not text or len(text) < 50:  # Skip tiny meaningless chunks
             continue
 
-        # metadata may already contain "page" or "page_number" depending on loader. [web:18]
         md = dict(doc.metadata or {})
         page = md.get("page", md.get("page_number"))
         source = md.get("source", file_path)
 
-        chunk = PDFChunk(
-            content=text,
-            page=page,
-            source=source,
-            metadata=md,
-        )
+        chunk = PDFChunk(content=text, page=page, source=source, metadata=md)
         chunks.append(chunk)
 
     logger.info("Created %d chunks from %s", len(chunks), file_path)
     return [c.to_dict() for c in chunks]
 
-
-# ---------------------------------------------------------------------
-# LangChain tool wrapper
-# ---------------------------------------------------------------------
 
 @tool("read_pdf")
 def read_pdf_tool(
@@ -117,44 +104,14 @@ def read_pdf_tool(
     chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
 ) -> List[Dict[str, Any]]:
     """
-    Read a local PDF file and return overlapping text chunks.
+    Read a local PDF and return overlapping text chunks.
 
     Args:
         file_path: Path to the PDF on disk.
-        chunk_size: Maximum characters per chunk (e.g., 800–1500).
-        chunk_overlap: Overlap between consecutive chunks.
+        chunk_size: Max characters per chunk (default 1200).
+        chunk_overlap: Overlap between chunks (default 200).
 
     Returns:
-        List of dicts with:
-        - content: text of the chunk
-        - page: page number (if available)
-        - source: file path
-        - metadata: original loader metadata
+        List of dicts with: content, page, source, metadata.
     """
-    return _read_pdf_impl(
-        file_path=file_path,
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-    )
-
-
-# ---------------------------------------------------------------------
-# Simple CLI test
-# ---------------------------------------------------------------------
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-
-    # Change this to a real PDF path in your project.
-    sample_path = "sample.pdf"
-
-    if not os.path.exists(sample_path):
-        print(f"Place a test PDF at: {sample_path}")
-    else:
-        print(f"Reading and splitting: {sample_path}")
-        chunks = _read_pdf_impl(sample_path, chunk_size=800, chunk_overlap=100)
-        print(f"Total chunks: {len(chunks)}")
-        for i, ch in enumerate(chunks[:5], start=1):
-            print("-" * 80)
-            print(f"Chunk {i} (page {ch['page']})")
-            print(ch["content"][:600], "...")
+    return _read_pdf_impl(file_path=file_path, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
