@@ -4,6 +4,9 @@ import os
 import json
 import shutil
 import logging
+import hashlib
+import math
+import re
 from typing import List, Dict, Any, Optional
 
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
@@ -12,8 +15,12 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 from langchain_community.vectorstores.faiss import FAISS
 from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
 from langchain.tools import tool
 from langchain_huggingface import HuggingFaceEmbeddings
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -29,16 +36,56 @@ _EMBEDDINGS = None
 _RERANKER = None
 
 
-def get_embeddings() -> HuggingFaceEmbeddings:
+class LocalHashEmbeddings(Embeddings):
+    """Dependency-light fallback embeddings that never require model downloads."""
+
+    def __init__(self, dimension: int = 384):
+        self.dimension = dimension
+
+    def _embed(self, text: str) -> List[float]:
+        vector = [0.0] * self.dimension
+        tokens = re.findall(r"[a-z0-9]{2,}", (text or "").lower())
+        if not tokens:
+            return vector
+
+        for token in tokens:
+            digest = hashlib.sha256(token.encode("utf-8")).digest()
+            bucket = int.from_bytes(digest[:4], "big") % self.dimension
+            sign = 1.0 if digest[4] % 2 == 0 else -1.0
+            weight = 1.0 + min(len(token), 12) / 12.0
+            vector[bucket] += sign * weight
+
+        norm = math.sqrt(sum(value * value for value in vector))
+        if norm > 0:
+            vector = [value / norm for value in vector]
+        return vector
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        return [self._embed(text) for text in texts]
+
+    def embed_query(self, text: str) -> List[float]:
+        return self._embed(text)
+
+
+def get_embeddings() -> Embeddings:
     global _EMBEDDINGS
     if _EMBEDDINGS is None:
         logger.info("Loading embedding model: %s", EMBEDDING_MODEL_NAME)
-        _EMBEDDINGS = HuggingFaceEmbeddings(
-            model_name=EMBEDDING_MODEL_NAME,
-            model_kwargs={"device": "cpu"},
-            encode_kwargs={"normalize_embeddings": True},
-        )
-        logger.info("Embedding model loaded.")
+        try:
+            _EMBEDDINGS = HuggingFaceEmbeddings(
+                model_name=EMBEDDING_MODEL_NAME,
+                model_kwargs={
+                    "device": "cpu",
+                    "local_files_only": True,
+                    "trust_remote_code": False,
+                },
+                encode_kwargs={"normalize_embeddings": True},
+            )
+            _EMBEDDINGS.embed_query("embedding health check")
+            logger.info("Embedding model loaded.")
+        except Exception as exc:
+            logger.warning("Falling back to local hash embeddings: %s", exc)
+            _EMBEDDINGS = LocalHashEmbeddings()
     return _EMBEDDINGS
 
 
@@ -48,7 +95,7 @@ def get_reranker():
         try:
             from sentence_transformers import CrossEncoder
             logger.info("Loading reranker model...")
-            _RERANKER = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+            _RERANKER = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", local_files_only=True)
             logger.info("Reranker loaded.")
         except Exception as exc:
             logger.warning("Reranker not available: %s. Skipping reranking.", exc)
@@ -236,7 +283,10 @@ def upsert_project_paper_chunks(
             "title": first_md.get("title") or paper_id,
             "arxiv_id": first_md.get("arxiv_id"),
             "pdf_url": first_md.get("pdf_url"),
+            "abs_url": first_md.get("abs_url"),   # ← ADD THIS
             "source": first_md.get("source"),
+            "is_metadata_only": bool(first_md.get("is_metadata_only")),
+            "chunk_count": int(first_md.get("chunk_count") or len(new_docs)),
         })
 
     return f"Indexed {len(new_docs)} chunks for paper '{paper_id}' in project '{project_id}'."
@@ -317,6 +367,19 @@ def remove_paper_from_project(project_id: str, paper_id: str) -> str:
     delete_paper_metadata(project_id, paper_id)
 
     return f"Removed '{paper_id}' ({removed} chunks). {len(remaining)} chunks remain."
+
+
+def get_all_project_chunks(project_id: str) -> List[Dict[str, Any]]:
+    """Retrieve all chunks across all papers in a project for synthesis."""
+    vs = _load_faiss_for_project(project_id)
+    if vs is None:
+        return []
+    
+    all_docs = list(vs.docstore._dict.values())
+    return [
+        {"content": doc.page_content, "metadata": dict(doc.metadata or {})}
+        for doc in all_docs
+    ]
 
 
 @tool("list_project_papers")
