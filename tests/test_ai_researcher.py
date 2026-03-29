@@ -8,7 +8,7 @@ from unittest.mock import patch
 os.environ.setdefault("GROQ_API_KEY", "test-key")
 
 import ai_researcher
-from ai_researcher import _build_context, _is_smalltalk, _rewrite_external_paper_query, _should_attempt_external_search, classify_intent, generate_answer
+from ai_researcher import _build_context, _is_smalltalk, _rewrite_external_paper_query, _should_attempt_external_search, classify_intent, generate_answer, get_model_name
 
 
 class AiResearcherTests(unittest.TestCase):
@@ -134,6 +134,10 @@ class AiResearcherTests(unittest.TestCase):
     def test_smalltalk_detects_self_introduction(self) -> None:
         self.assertTrue(_is_smalltalk("hi myself harshit"))
         self.assertFalse(_is_smalltalk("hi tell me the paper that is being viral that it will replace transformers"))
+
+    def test_get_model_name_stays_on_default_groq_model(self) -> None:
+        self.assertEqual(get_model_name("chat"), "openai/gpt-oss-20b")
+        self.assertEqual(get_model_name("notebook_codegen"), "openai/gpt-oss-20b")
 
     def test_classify_intent_keeps_compare_queries_as_compare(self) -> None:
         state = {

@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, type ComponentProps, type DragEvent, type 
 import {
   Send, Paperclip, Plus, Search, Bot, User, Sparkles,
   UploadCloud, Cpu, ChevronDown, ChevronUp, ExternalLink,
-  BookOpen, FileText, Loader2, Library, Trash2, AlertCircle, X
+  BookOpen, FileText, Loader2, Library, Trash2, AlertCircle, X, Download
 } from "lucide-react";
 
 import ReactMarkdown from "react-markdown";
@@ -92,6 +92,24 @@ type LibraryResponse = {
 
 type PaperSearchResponse = {
   papers?: PaperResult[];
+};
+
+type NotebookResponse = {
+  status: string;
+  paper_id: string;
+  title: string;
+  file_name: string;
+  notebook_json: string;
+  preview_markdown: string;
+  dependencies: string[];
+  source_url?: string;
+  generated_with_model: string;
+  colab_ready: boolean;
+};
+
+type GenerateNotebookRequest = {
+  api_key: string;
+  model: string;
 };
 
 type ApiError = {
@@ -200,9 +218,14 @@ export default function HomePage() {
   const [searchResults, setSearchResults] = useState<PaperResult[]>([]);
   const [removingId, setRemovingId] = useState<string | null>(null);
 
-  const [briefContent, setBriefContent] = useState<string | null>(null);
-  const [isGeneratingBrief, setIsGeneratingBrief] = useState(false);
-  const [showBriefModal, setShowBriefModal] = useState(false);
+  const [generatedNotebook, setGeneratedNotebook] = useState<NotebookResponse | null>(null);
+  const [isGeneratingNotebook, setIsGeneratingNotebook] = useState(false);
+  const [showNotebookModal, setShowNotebookModal] = useState(false);
+  const [notebookError, setNotebookError] = useState<string | null>(null);
+  const [activeNotebookPaperId, setActiveNotebookPaperId] = useState<string | null>(null);
+  const [selectedNotebookPaper, setSelectedNotebookPaper] = useState<LibraryItem | null>(null);
+  const [geminiApiKey, setGeminiApiKey] = useState("");
+  const [geminiModel, setGeminiModel] = useState("gemini-2.5-pro");
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const chatRef = useRef<HTMLDivElement | null>(null);
@@ -211,6 +234,10 @@ export default function HomePage() {
   useEffect(() => {
     setMounted(true);
     document.documentElement.classList.add("dark");
+    if (typeof window !== "undefined") {
+      setGeminiApiKey(localStorage.getItem("ai_researcher_gemini_api_key") || "");
+      setGeminiModel(localStorage.getItem("ai_researcher_gemini_model") || "gemini-2.5-pro");
+    }
   }, []);
 
   useEffect(() => {
@@ -218,6 +245,13 @@ export default function HomePage() {
       localStorage.setItem("ai_researcher_project_id", projectId);
     }
   }, [projectId]);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      localStorage.setItem("ai_researcher_gemini_api_key", geminiApiKey);
+      localStorage.setItem("ai_researcher_gemini_model", geminiModel);
+    }
+  }, [geminiApiKey, geminiModel]);
 
   async function refreshProjectData(activeProjectId: string) {
     const [papersResponse, statsResponse] = await Promise.all([
@@ -426,30 +460,81 @@ export default function HomePage() {
     }
   }
 
-  async function handleGenerateBrief() {
-    if (isGeneratingBrief) return;
-    setIsGeneratingBrief(true);
-    setBriefContent("");
-    setShowBriefModal(true);
+  function downloadNotebook(notebook: NotebookResponse) {
+    const blob = new Blob([notebook.notebook_json], { type: "application/x-ipynb+json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = notebook.file_name || `${notebook.paper_id}.ipynb`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function downloadAndOpenColab(notebook: NotebookResponse) {
+    downloadNotebook(notebook);
+    window.open("https://colab.research.google.com/", "_blank", "noopener,noreferrer");
+  }
+
+  function openNotebookModal(item: LibraryItem) {
+    if (item.is_metadata_only) return;
+    setSelectedNotebookPaper(item);
+    setActiveNotebookPaperId(item.id);
+    setNotebookError(null);
+    setGeneratedNotebook(null);
+    setShowNotebookModal(true);
+  }
+
+  async function handleGenerateNotebook() {
+    if (!selectedNotebookPaper || isGeneratingNotebook) return;
+    if (!geminiApiKey.trim()) {
+      setNotebookError("Gemini API key is required to generate a notebook.");
+      return;
+    }
+
+    setNotebookError(null);
+    setGeneratedNotebook(null);
+    setIsGeneratingNotebook(true);
 
     try {
-      const res = await fetch(`${API_BASE}/generate-brief`, {
-        method:  "POST",
+      const payload: GenerateNotebookRequest = {
+        api_key: geminiApiKey.trim(),
+        model: geminiModel.trim() || "gemini-2.5-pro",
+      };
+      const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/papers/${encodeURIComponent(selectedNotebookPaper.id)}/generate-notebook`, {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ project_id: projectId }),
+        body: JSON.stringify(payload),
       });
-      if (!res.ok) throw new Error("Failed to generate brief");
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({} as ApiError)) as ApiError;
+        throw new Error(errData.detail || `Notebook generation failed (${res.status})`);
+      }
 
-      await readStream(
-        res,
-        (text) => setBriefContent((prev) => (prev || "") + text),
-        undefined,
-        (message) => setBriefContent((prev) => (prev || "") + `\n\n❌ Error: ${message}`)
-      );
+      const data = await res.json() as NotebookResponse;
+      setGeneratedNotebook(data);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: generateMsgId(),
+          role: "assistant",
+          content: `✅ Built a runnable notebook for **"${selectedNotebookPaper.title}"** with **${data.generated_with_model}**. You can preview it now and download the \`.ipynb\` file.`,
+          ts: nowLabel(),
+        },
+      ]);
     } catch (error: unknown) {
-      setBriefContent((prev) => (prev || "") + `\n\n❌ Error: ${getErrorMessage(error)}`);
+      const message = getErrorMessage(error);
+      setNotebookError(message);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: generateMsgId(),
+          role: "assistant",
+          content: `❌ Notebook generation failed for **"${selectedNotebookPaper.title}"**: ${message}`,
+          ts: nowLabel(),
+        },
+      ]);
     } finally {
-      setIsGeneratingBrief(false);
+      setIsGeneratingNotebook(false);
     }
   }
 
@@ -888,7 +973,7 @@ export default function HomePage() {
                   </div>
                 )}
                 {libraryItems.map((item) => (
-                  <div key={item.id} className="group flex items-start justify-between p-3 rounded-xl bg-white/5 border border-white/5 hover:bg-white/10 transition">
+                  <div key={item.id} className="group flex items-start justify-between gap-3 p-3 rounded-xl bg-white/5 border border-white/5 hover:bg-white/10 transition">
                     <div className="flex items-start gap-3 overflow-hidden">
                       <div className="mt-1 p-1.5 rounded bg-indigo-500/20 text-indigo-400">
                         <FileText className="h-4 w-4" />
@@ -913,95 +998,146 @@ export default function HomePage() {
                         )}
                       </div>
                     </div>
-                    <button
-                      onClick={() => handleDeleteLibraryItem(item.id)}
-                      disabled={removingId === item.id}
-                      className="opacity-0 group-hover:opacity-100 text-zinc-500 hover:text-red-400 transition p-1 disabled:opacity-50"
-                      title="Remove paper"
-                    >
-                      {removingId === item.id
-                        ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        : <Trash2 className="h-3.5 w-3.5" />
-                      }
-                    </button>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        onClick={() => openNotebookModal(item)}
+                        disabled={item.is_metadata_only || isGeneratingNotebook}
+                        className="rounded-lg border border-indigo-500/30 bg-indigo-500/10 p-2 text-indigo-300 transition hover:bg-indigo-500/20 hover:text-indigo-100 disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/5 disabled:text-zinc-500"
+                        title={item.is_metadata_only ? "Notebook generation needs full text" : "Generate notebook"}
+                      >
+                        {isGeneratingNotebook && activeNotebookPaperId === item.id
+                          ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          : <Cpu className="h-3.5 w-3.5" />
+                        }
+                      </button>
+                      <button
+                        onClick={() => handleDeleteLibraryItem(item.id)}
+                        disabled={removingId === item.id}
+                        className="opacity-0 group-hover:opacity-100 text-zinc-500 hover:text-red-400 transition p-1 disabled:opacity-50"
+                        title="Remove paper"
+                      >
+                        {removingId === item.id
+                          ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          : <Trash2 className="h-3.5 w-3.5" />
+                        }
+                      </button>
+                    </div>
                   </div>
                 ))}
-                
-                {libraryItems.length > 0 && (
-                  <div className="pt-4 border-t border-white/5 mt-4">
-                    <button
-                      onClick={handleGenerateBrief}
-                      disabled={isGeneratingBrief}
-                      className="w-full relative group overflow-hidden rounded-xl bg-gradient-to-r from-indigo-500 to-violet-500 p-[1px] shadow-lg shadow-indigo-500/20 disabled:opacity-50 transition-all hover:shadow-indigo-500/40"
-                    >
-                      <div className="flex h-full w-full items-center justify-center gap-2 rounded-xl bg-zinc-950 px-4 py-3 text-sm font-bold text-white transition-all group-hover:bg-opacity-0">
-                        {isGeneratingBrief ? <Loader2 className="h-4 w-4 animate-spin text-white" /> : <Sparkles className="h-4 w-4 text-indigo-300 group-hover:text-white" />}
-                        Generate Research Brief
-                      </div>
-                    </button>
-                    <p className="text-center text-[10px] text-zinc-500 mt-2">
-                      Synthesizes all {libraryItems.length} papers into a comprehensive report
-                    </p>
-                  </div>
-                )}
               </div>
             )}
           </aside>
         </div>
       </main>
 
-      {/* Research Brief Modal */}
-      {showBriefModal && (
+      {/* Notebook Modal */}
+      {showNotebookModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
           <div className="bg-zinc-900 border border-white/10 rounded-2xl w-full max-w-4xl max-h-[85vh] flex flex-col overflow-hidden shadow-2xl">
             <div className="flex items-center justify-between p-4 border-b border-white/10 bg-zinc-950/50">
               <div className="flex items-center gap-3">
                 <div className="p-2 bg-indigo-500/20 text-indigo-400 rounded-lg">
-                  {isGeneratingBrief ? <Loader2 className="h-5 w-5 animate-spin" /> : <Sparkles className="h-5 w-5" />}
+                  {isGeneratingNotebook ? <Loader2 className="h-5 w-5 animate-spin" /> : <Cpu className="h-5 w-5" />}
                 </div>
                 <div>
-                  <h2 className="text-lg font-bold text-white">AI Research Brief</h2>
-                  <p className="text-xs text-zinc-400">Synthesizing {libraryItems.length} papers from your library</p>
+                  <h2 className="text-lg font-bold text-white">Paper to Notebook</h2>
+                  <p className="text-xs text-zinc-400">
+                    {generatedNotebook
+                      ? `Generated with ${generatedNotebook.generated_with_model}`
+                      : selectedNotebookPaper
+                        ? `Selected paper: ${selectedNotebookPaper.title}`
+                        : "Transforming your selected paper into a runnable notebook"}
+                  </p>
                 </div>
               </div>
               <button
-                onClick={() => setShowBriefModal(false)}
+                onClick={() => {
+                  setShowNotebookModal(false);
+                  setSelectedNotebookPaper(null);
+                  setNotebookError(null);
+                }}
                 className="p-2 text-zinc-500 hover:text-white transition-colors rounded-lg hover:bg-white/5"
               >
                 <X className="h-5 w-5" />
               </button>
             </div>
             <div className="flex-1 overflow-y-auto p-6 space-y-4">
-              {briefContent ? (
+              {generatedNotebook ? (
                 <div className="prose prose-invert prose-indigo max-w-none text-sm leading-relaxed prose-headings:text-indigo-300 prose-headings:font-bold prose-a:text-indigo-400 hover:prose-a:text-indigo-300 prose-p:text-white/80 prose-li:text-white/80 prose-table:border-collapse prose-th:border prose-th:border-zinc-700 prose-th:bg-zinc-800 prose-th:px-3 prose-th:py-2 prose-td:border prose-td:border-zinc-800 prose-td:px-3 prose-td:py-2">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{briefContent}</ReactMarkdown>
+                  <div className="mb-5 flex flex-wrap gap-2">
+                    {generatedNotebook.dependencies.map((dependency) => (
+                      <span key={dependency} className="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-indigo-200">
+                        {dependency}
+                      </span>
+                    ))}
+                  </div>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{generatedNotebook.preview_markdown}</ReactMarkdown>
                 </div>
-              ) : (
+              ) : isGeneratingNotebook ? (
                 <div className="flex flex-col items-center justify-center h-full text-zinc-500 space-y-4">
                   <Loader2 className="h-8 w-8 animate-spin text-indigo-500/50" />
-                  <p className="animate-pulse">Analyzing your research library...</p>
+                  <p className="animate-pulse">Gemini 2.5 Pro is analyzing the PDF and building a Colab-ready notebook...</p>
                 </div>
+              ) : notebookError ? (
+                <div className="space-y-4">
+                  <div className="rounded-2xl border border-red-500/20 bg-red-500/10 p-4 text-sm text-red-200">
+                    <div className="flex items-start gap-3">
+                      <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                      <div>
+                        <p className="font-semibold">Notebook generation failed</p>
+                        <p className="mt-1 text-red-100/80">{notebookError}</p>
+                      </div>
+                    </div>
+                  </div>
+                  <NotebookSetupCard
+                    selectedPaper={selectedNotebookPaper}
+                    geminiApiKey={geminiApiKey}
+                    geminiModel={geminiModel}
+                    onApiKeyChange={setGeminiApiKey}
+                    onModelChange={setGeminiModel}
+                  />
+                </div>
+              ) : (
+                <NotebookSetupCard
+                  selectedPaper={selectedNotebookPaper}
+                  geminiApiKey={geminiApiKey}
+                  geminiModel={geminiModel}
+                  onApiKeyChange={setGeminiApiKey}
+                  onModelChange={setGeminiModel}
+                />
               )}
             </div>
             <div className="p-4 border-t border-white/10 bg-zinc-950/50 flex justify-end gap-3">
+              {!generatedNotebook && (
+                <button
+                  onClick={() => void handleGenerateNotebook()}
+                  disabled={!selectedNotebookPaper || !geminiApiKey.trim() || isGeneratingNotebook}
+                  className="flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-50 transition"
+                >
+                  {isGeneratingNotebook ? <Loader2 className="h-4 w-4 animate-spin" /> : <Cpu className="h-4 w-4" />}
+                  Generate Notebook
+                </button>
+              )}
               <button
-                onClick={() => {
-                  if (briefContent) {
-                    const blob = new Blob([briefContent], { type: 'text/markdown' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `Research_Brief_${projectId.slice(0, 8)}.md`;
-                    a.click();
-                  }
-                }}
-                disabled={!briefContent || isGeneratingBrief}
+                onClick={() => generatedNotebook && downloadNotebook(generatedNotebook)}
+                disabled={!generatedNotebook || isGeneratingNotebook}
                 className="flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg bg-zinc-800 text-white hover:bg-zinc-700 disabled:opacity-50 transition"
               >
-                <FileText className="h-4 w-4" /> Export Markdown
+                <Download className="h-4 w-4" /> Download `.ipynb`
               </button>
               <button
-                onClick={() => setShowBriefModal(false)}
+                onClick={() => generatedNotebook && downloadAndOpenColab(generatedNotebook)}
+                disabled={!generatedNotebook || isGeneratingNotebook}
+                className="flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg bg-white text-zinc-900 hover:bg-zinc-200 disabled:opacity-50 transition"
+              >
+                <ExternalLink className="h-4 w-4" /> Download + Open Colab
+              </button>
+              <button
+                onClick={() => {
+                  setShowNotebookModal(false);
+                  setSelectedNotebookPaper(null);
+                  setNotebookError(null);
+                }}
                 className="px-4 py-2 text-sm font-medium rounded-lg bg-indigo-600 text-white hover:bg-indigo-500 transition"
               >
                 Close
@@ -1015,6 +1151,70 @@ export default function HomePage() {
 }
 
 // ── Sub-components ─────────────────────────────────────────────────────────────
+
+function NotebookSetupCard({
+  selectedPaper,
+  geminiApiKey,
+  geminiModel,
+  onApiKeyChange,
+  onModelChange,
+}: {
+  selectedPaper: LibraryItem | null;
+  geminiApiKey: string;
+  geminiModel: string;
+  onApiKeyChange: (value: string) => void;
+  onModelChange: (value: string) => void;
+}) {
+  return (
+    <div className="space-y-5">
+      <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">Notebook Generation</p>
+        <h3 className="mt-2 text-lg font-bold text-white">{selectedPaper?.title || "Select a paper"}</h3>
+        <p className="mt-2 text-sm text-zinc-300 leading-relaxed">
+          This feature uses <span className="font-semibold text-white">Gemini 2.5 Pro</span> on the real paper PDF so it can read equations,
+          structure, and figures more faithfully. Your Gemini key is used only for notebook generation. Chat, search, import, and the rest of the
+          app still stay on Groq exactly as before.
+        </p>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-[1.2fr_0.8fr]">
+        <div className="rounded-2xl border border-white/10 bg-zinc-950/60 p-4">
+          <label className="block text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Gemini API Key</label>
+          <input
+            type="password"
+            value={geminiApiKey}
+            onChange={(e) => onApiKeyChange(e.target.value)}
+            placeholder="Paste your Gemini API key here"
+            className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-white outline-none transition focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/60"
+          />
+          <p className="mt-2 text-xs text-zinc-400">
+            Stored locally in your browser for convenience. It is only sent when you click Generate Notebook.
+          </p>
+
+          <label className="mt-4 block text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Model</label>
+          <input
+            value={geminiModel}
+            onChange={(e) => onModelChange(e.target.value)}
+            className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-white outline-none transition focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/60"
+          />
+          <p className="mt-2 text-xs text-zinc-400">Recommended: <span className="font-mono text-zinc-200">gemini-2.5-pro</span></p>
+        </div>
+
+        <div className="rounded-2xl border border-indigo-500/20 bg-indigo-500/10 p-4">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-indigo-200">How To Get A Key</p>
+          <ol className="mt-3 space-y-3 text-sm text-indigo-50/90">
+            <li>1. Open <a className="text-white underline hover:text-indigo-100" href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">Google AI Studio API Keys</a>.</li>
+            <li>2. Sign in, create an API key, and copy it.</li>
+            <li>3. Paste it here, keep the model as <span className="font-mono">gemini-2.5-pro</span>, and click <span className="font-semibold">Generate Notebook</span>.</li>
+          </ol>
+          <p className="mt-4 text-xs leading-relaxed text-indigo-100/80">
+            If a paper was added as metadata-only, re-upload or re-import the full PDF first so Gemini can analyze the actual document.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function ChatBubble({ message, isLatest, isStreaming }: { message: Message; isLatest: boolean; isStreaming?: boolean }) {
   const isUser    = message.role === "user";

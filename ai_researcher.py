@@ -30,15 +30,35 @@ logger.setLevel(logging.INFO)
 # LLM
 # ─────────────────────────────────────────────
 
-def get_llm(intent: str = "chat", max_tokens: int = 2048) -> ChatGroq:
+def get_model_name(intent: str = "chat") -> str:
+    default_model = os.environ.get("GROQ_DEFAULT_MODEL", "openai/gpt-oss-20b")
+    return default_model
+
+
+def _build_llm(intent: str = "chat", max_tokens: int = 2048) -> ChatGroq:
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
         raise ValueError("GROQ_API_KEY environment variable is not set.")
-    llm = ChatGroq(model="openai/gpt-oss-20b", temperature=0.2, max_tokens=max_tokens)
+    model = get_model_name(intent)
+    llm = ChatGroq(
+        model=model,
+        temperature=0.2,
+        max_tokens=max_tokens,
+        reasoning_format="hidden",
+    )
+    return llm
+
+
+def get_llm(intent: str = "chat", max_tokens: int = 2048) -> ChatGroq:
+    llm = _build_llm(intent=intent, max_tokens=max_tokens)
     # CRITICAL: Prevent model from ever emitting tool call JSON.
     # Without this, the model spontaneously calls "arxiv.run" from training memory
     # when users mention "arxiv tool", causing Groq 400: tool_use_failed.
     return llm.bind(tool_choice="none")
+
+
+def get_structured_llm(intent: str = "chat", max_tokens: int = 2048) -> ChatGroq:
+    return _build_llm(intent=intent, max_tokens=max_tokens)
 
 # ─────────────────────────────────────────────
 # State

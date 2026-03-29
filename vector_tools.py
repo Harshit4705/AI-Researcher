@@ -283,6 +283,7 @@ def upsert_project_paper_chunks(
             "title": first_md.get("title") or paper_id,
             "arxiv_id": first_md.get("arxiv_id"),
             "pdf_url": first_md.get("pdf_url"),
+            "local_pdf_path": first_md.get("local_pdf_path"),
             "abs_url": first_md.get("abs_url"),   # ← ADD THIS
             "source": first_md.get("source"),
             "is_metadata_only": bool(first_md.get("is_metadata_only")),

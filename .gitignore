@@ -21,3 +21,12 @@ faiss_indexes/
 *.zip
 *.log
 *.mp4
+
+# Node modules
+node_modules/
+
+# Tool outputs
+out.json
+
+# Python version
+.python-version

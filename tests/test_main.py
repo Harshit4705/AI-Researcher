@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from types import SimpleNamespace
@@ -116,6 +117,88 @@ class MainApiTests(unittest.TestCase):
         self.assertEqual(paper["title"], "Selected Title")
         self.assertEqual(paper["authors"], ["Komal Sharma"])
         self.assertEqual(paper["abs_url"], "https://example.com/paper")
+
+    def test_build_generated_notebook_includes_colab_metadata(self) -> None:
+        context = {
+            "paper_id": "p1",
+            "title": "Attention Is All You Need",
+            "source_url": "https://arxiv.org/abs/1706.03762",
+            "chunk_count": 12,
+        }
+        blueprint = main.NotebookBlueprint(
+            title="Attention Is All You Need",
+            overview_markdown="### Abstract\nTransformer overview",
+            methodology_markdown="### Methodology\nSelf-attention",
+            equations_markdown="### Equations\n$$Attention(Q,K,V)$$",
+            implementation_markdown="### Implementation\nCPU-safe notes",
+            experiment_markdown="### Experiments\nToy run",
+            conclusion_markdown="### Conclusion\nDone",
+            assumptions_markdown="### Assumptions\nEducational approximation",
+            dependencies=["torch", "matplotlib"],
+            setup_code="import torch",
+            implementation_code="model = torch.nn.Linear(4, 4)",
+            experiment_code="print('ok')",
+        )
+
+        notebook, notebook_json, dependencies, file_name = main._build_generated_notebook(context, blueprint)
+
+        self.assertEqual(notebook["metadata"]["colab"]["include_colab_link"], True)
+        self.assertIn("%pip install", notebook["cells"][2]["source"])
+        self.assertIn("torch", dependencies)
+        self.assertTrue(file_name.endswith(".ipynb"))
+        self.assertIn("Attention Is All You Need", notebook_json)
+
+    def test_generate_paper_notebook_endpoint_returns_notebook_payload(self) -> None:
+        context = {
+            "paper_id": "p1",
+            "title": "Attention Is All You Need",
+            "source_url": "https://arxiv.org/abs/1706.03762",
+            "local_pdf_path": "",
+            "chunk_count": 8,
+            "paper_text": "Transformer paper text",
+            "equation_candidates": [],
+        }
+        fake_notebook = {"cells": [], "metadata": {"colab": {"include_colab_link": True}}, "nbformat": 4, "nbformat_minor": 5}
+
+        with patch.object(main, "_prepare_notebook_context", return_value=context), \
+             patch.object(main, "_run_gemini_notebook_pipeline", return_value=(
+                 fake_notebook,
+                 json.dumps(fake_notebook),
+                 ["torch"],
+                 "## Attention Is All You Need",
+                 "Attention_Is_All_You_Need.ipynb",
+                 "Attention Is All You Need",
+             )):
+            response = self.client.post(
+                "/projects/demo/papers/p1/generate-notebook",
+                json={"api_key": "test-gemini-key", "model": "gemini-2.5-pro"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], "success")
+        self.assertEqual(data["paper_id"], "p1")
+        self.assertEqual(data["generated_with_model"], "gemini-2.5-pro")
+        self.assertTrue(data["colab_ready"])
+
+    def test_generate_paper_notebook_endpoint_rejects_metadata_only_entries(self) -> None:
+        with patch.object(main, "_prepare_notebook_context", side_effect=ValueError("Notebook generation requires a full-text paper in your library, not a metadata-only entry.")):
+            response = self.client.post(
+                "/projects/demo/papers/p1/generate-notebook",
+                json={"api_key": "test-gemini-key", "model": "gemini-2.5-pro"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("full-text paper", response.json()["detail"])
+
+    def test_generate_paper_notebook_endpoint_requires_gemini_api_key(self) -> None:
+        response = self.client.post(
+            "/projects/demo/papers/p1/generate-notebook",
+            json={"api_key": "", "model": "gemini-2.5-pro"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Gemini API key", response.json()["detail"])
 
 
 if __name__ == "__main__":
