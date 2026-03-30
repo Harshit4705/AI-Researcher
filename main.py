@@ -30,7 +30,7 @@ from vector_tools import (
     get_all_project_chunks,
 )
 from research_tool import search_research_papers_tool as search_arxiv_tool, search_arxiv
-from ai_researcher import APP, get_llm, get_model_name, get_structured_llm
+from ai_researcher import APP, get_llm
 from langchain_core.messages import SystemMessage, HumanMessage
 
 logger = logging.getLogger(__name__)
@@ -62,181 +62,138 @@ TEMP_DIR.mkdir(exist_ok=True)
 PAPER_STORAGE_DIR = Path("paper_store")
 PAPER_STORAGE_DIR.mkdir(exist_ok=True)
 
-GEMINI_NOTEBOOK_MODEL = "gemini-2.5-flash"
+GEMINI_NOTEBOOK_MODEL = "gemini-2.5-pro"
 GEMINI_MAX_TOKENS_ANALYSIS = 8192
-GEMINI_MAX_TOKENS_DESIGN = 8192
+GEMINI_MAX_TOKENS_PLAN = 8192
 GEMINI_MAX_TOKENS_GENERATE = 65536
-GEMINI_MAX_TOKENS_VALIDATE = 65536
+GEMINI_MAX_TOKENS_REVIEW = 65536
 GEMINI_RETRY_DELAYS = [5, 15, 30]
 
-GEMINI_NOTEBOOK_SYSTEM_PROMPT = (
-    "You are an expert research engineer and educator who faithfully implements "
-    "academic papers as runnable, educational Python code. "
-    "You use real ML components (PyTorch, transformer layers, actual training loops) "
-    "at a reduced scale that runs on CPU. You prioritize faithful replication of the "
-    "paper's architecture and algorithms while making the code deeply educational with "
-    "clear explanations, comments, and simple visualizations."
+RESEARCH_LAB_SYSTEM_PROMPT = (
+    "You are a senior research engineer building trustworthy research companion artifacts "
+    "from academic papers. Produce grounded, educational, CPU-runnable materials that clearly "
+    "separate paper-faithful content from simplifications. Prefer transparent assumptions, "
+    "evidence-aware summaries, and reproducibility guidance over flashy claims."
 )
 
-GEMINI_ANALYSIS_PROMPT = """Read this research paper carefully and extract a thorough structured analysis.
-Return a JSON object with EXACTLY these fields:
+RESEARCH_LAB_ANALYSIS_PROMPT = """Study the attached research paper PDF and return ONLY valid JSON.
+
+Expected schema:
 {
-  "title": "Full paper title",
-  "authors": "Author list as a single string",
-  "abstract_summary": "2-3 sentence plain English summary of the paper",
-  "problem_statement": "What problem does the paper solve? (2-3 sentences, no jargon)",
-  "key_insight": "The core idea or innovation in one sentence",
-  "algorithms": [
+  "paper_title": "full title",
+  "author_line": "authors as a single line",
+  "field": "primary field",
+  "elevator_summary": "2-3 sentence plain English summary",
+  "core_question": "what question the paper answers",
+  "main_takeaways": ["takeaway 1", "takeaway 2", "takeaway 3"],
+  "method_blueprint": [
     {
-      "name": "Algorithm name",
-      "description": "What this algorithm does in plain English",
-      "inputs": ["list of inputs"],
-      "outputs": ["list of outputs"],
-      "steps": ["ordered list of detailed algorithmic steps"],
-      "is_core": true,
-      "equations": ["key equations"],
-      "architecture_details": "Describe the neural network architecture used"
+      "name": "component or stage name",
+      "role": "why it matters",
+      "details": ["key detail 1", "key detail 2"]
     }
   ],
-  "baselines": [
+  "datasets": ["dataset or benchmark names"],
+  "metrics": ["metric names"],
+  "equations": ["important equations or formulas"],
+  "implementation_hazards": ["details that make faithful reproduction hard"],
+  "evidence_anchors": [
     {
-      "name": "Baseline method name",
-      "description": "Detailed description of how it works"
+      "claim": "important claim",
+      "paper_support": "where or how the paper supports it"
     }
-  ],
-  "evaluation_metrics": ["list of metrics used"],
-  "key_equations": ["important equations"],
-  "model_architecture": {
-    "type": "Transformer/CNN/RNN/etc.",
-    "key_layers": ["list of layer types used"],
-    "dimensions": "hidden dim, num heads, num layers mentioned in paper",
-    "special_features": "any non-standard architectural choices"
-  },
-  "dataset": {
-    "name": "Dataset name if mentioned",
-    "description": "Brief description",
-    "preprocessing": "Any special preprocessing steps"
-  },
-  "research_field": "Primary research field in 2-4 words",
-  "key_contributions": ["Contribution 1", "Contribution 2", "Contribution 3"]
+  ]
 }
-Be exhaustive. Extract every algorithmic detail, equation, and architectural choice."""
 
-GEMINI_DESIGN_PROMPT_TEMPLATE = """You are given the analysis of a research paper.
-Your job is to design a toy implementation plan for a Jupyter notebook that demonstrates
-the paper's core ideas using real PyTorch code at a small, CPU-runnable scale.
+Be conservative: if a detail is unclear, say so instead of inventing it."""
 
-Paper Analysis:
+RESEARCH_LAB_PLAN_PROMPT_TEMPLATE = """You are designing a custom Research Lab Pack for a paper.
+Return ONLY valid JSON.
+
+Generation goal: {generation_goal}
+Compute profile: {compute_profile}
+Include study questions: {include_study_questions}
+Include reproducibility checklist: {include_reproducibility_checklist}
+Include risk notes: {include_risk_notes}
+
+Paper analysis:
 ```json
 {analysis_json}
 ```
 
-Return a JSON object with:
+Expected schema:
 {{
-  "notebook_title": "A clear, descriptive title for the notebook",
-  "model_architecture": {{
-    "type": "Transformer/CNN/RNN/etc.",
-    "embed_dim": 64,
-    "num_layers": 2,
-    "num_heads": 4,
-    "vocab_size": 1000,
-    "max_seq_len": 32,
-    "other_params": {{}}
-  }},
-  "synthetic_data": {{
-    "description": "What kind of toy data to generate",
-    "size": "e.g., 500 training samples, 100 test samples",
-    "generation_method": "How to create it"
-  }},
-  "training_config": {{
-    "num_epochs": 10,
-    "batch_size": 16,
-    "learning_rate": 0.001,
-    "optimizer": "Adam",
-    "loss_function": "CrossEntropyLoss or custom"
-  }},
-  "mock_models": [
+  "artifact_title": "title for the lab pack",
+  "reader_positioning": "who this pack is best for",
+  "implementation_strategy": "how to keep the code faithful but runnable",
+  "dataset_strategy": "real dataset use or synthetic fallback",
+  "execution_notes": ["important runtime notes"],
+  "notebook_sections": [
     {{
-      "name": "BaselineModel",
-      "purpose": "What baseline this represents",
-      "architecture_summary": "Brief description of layers"
-    }},
-    {{
-      "name": "PaperModel",
-      "purpose": "The paper's proposed method",
-      "architecture_summary": "Brief description"
+      "heading": "section heading",
+      "goal": "why this section exists",
+      "cell_mix": ["markdown", "code"]
     }}
   ],
-  "visualizations": [
-    {{
-      "type": "training curves",
-      "description": "Loss over time for both models"
-    }},
-    {{
-      "type": "metric comparison",
-      "description": "Bar chart comparing baseline vs paper method"
-    }}
-  ],
-  "implementation_notes": "Important simplifications or assumptions"
-}}
-Make it realistic but small-scale and focus on educational clarity."""
+  "deliverables": ["notebook", "study guide", "reproducibility checklist"],
+  "artifact_summary": ["summary bullet 1", "summary bullet 2", "summary bullet 3"]
+}}"""
 
-GEMINI_GENERATE_PROMPT_TEMPLATE = """You have analyzed a research paper and designed a toy implementation plan.
-Now generate the complete Jupyter notebook as a JSON array of cells.
+RESEARCH_LAB_GENERATE_PROMPT_TEMPLATE = """Create a Research Lab Pack for this paper and return ONLY valid JSON.
 
-Paper Analysis:
+Generation goal: {generation_goal}
+Compute profile: {compute_profile}
+Include study questions: {include_study_questions}
+Include reproducibility checklist: {include_reproducibility_checklist}
+Include risk notes: {include_risk_notes}
+
+Paper analysis:
 ```json
 {analysis_json}
 ```
 
-Design Plan:
+Plan:
 ```json
-{design_json}
+{plan_json}
 ```
 
-Return a JSON array of notebook cells following this exact 12-section structure:
-1. Title & Paper Overview (markdown)
-2. Problem Intuition (markdown)
-3. Imports & Setup (code)
-4. Dataset & Tokenization (code + markdown)
-5. Model Architecture (code + markdown)
-6. Loss Function & Training Utilities (code)
-7. Baseline Implementation (code + markdown)
-8. Paper's Main Algorithm — Training (code + markdown)
-9. Inference / Generation (code + markdown)
-10. Full Experiment & Evaluation (code)
-11. Visualizations (code)
-12. Summary & Next Steps (markdown)
+Expected schema:
+{{
+  "title": "artifact title",
+  "dependencies": ["python package names"],
+  "artifact_summary": ["summary bullet 1", "summary bullet 2", "summary bullet 3"],
+  "study_questions": ["question 1", "question 2"],
+  "reproducibility_checklist": ["check 1", "check 2"],
+  "risk_notes": ["risk 1", "risk 2"],
+  "cells": [
+    {{
+      "cell_type": "markdown" | "code",
+      "source": "complete cell content"
+    }}
+  ]
+}}
 
-Each cell must be:
-{{ "cell_type": "code" | "markdown", "source": "full cell content" }}
+Requirements:
+- The notebook must run on CPU.
+- Use real PyTorch code when modeling is needed.
+- Keep cells compact and educational.
+- Mark any approximation explicitly.
+- Avoid placeholders in important code paths."""
 
-Critical requirements:
-- Use real PyTorch with actual training loops
-- No placeholders like TODO, pass, or ellipsis in critical code
-- Include educational comments and print statements
-- Make it runnable on CPU with small data
-- Include concrete dependencies and plots
+RESEARCH_LAB_REVIEW_PROMPT_TEMPLATE = """You are reviewing a generated Research Lab Pack for validity and clarity.
+Return ONLY valid JSON using the exact same schema as the input.
 
-Return ONLY the JSON array."""
+Fix issues such as:
+- invalid JSON
+- repeated cells
+- misleading claims
+- code that is not CPU-friendly
+- missing explanation around approximations
 
-GEMINI_VALIDATE_PROMPT_TEMPLATE = """You are given a JSON array of Jupyter notebook cells.
-Validate and repair them.
-
-Cells:
+Generated pack:
 ```json
-{cells_json}
-```
-
-Check for:
-1. Undefined variables
-2. Missing imports
-3. Syntax errors
-4. Logical execution order
-5. No placeholders
-6. Complete implementations
-
-Return the corrected cells as the same JSON array structure and nothing else."""
+{draft_json}
+```"""
 
 # ─────────────────────────────────────────────
 # In-memory chat history store
@@ -325,21 +282,6 @@ class GenerateBriefRequest(BaseModel):
     project_id: str
 
 
-class NotebookBlueprint(BaseModel):
-    title: str
-    overview_markdown: str
-    methodology_markdown: str
-    equations_markdown: str
-    implementation_markdown: str
-    experiment_markdown: str
-    conclusion_markdown: str
-    assumptions_markdown: str
-    dependencies: List[str]
-    setup_code: str
-    implementation_code: str
-    experiment_code: str
-
-
 class GenerateNotebookResponse(BaseModel):
     status: str
     paper_id: str
@@ -352,11 +294,22 @@ class GenerateNotebookResponse(BaseModel):
     source_url: Optional[str] = None
     generated_with_model: str
     colab_ready: bool
+    artifact_summary: List[str] = []
+    study_questions: List[str] = []
+    reproducibility_checklist: List[str] = []
+    risk_notes: List[str] = []
+    generation_goal: str = "teaching"
+    compute_profile: str = "balanced"
 
 
 class GenerateNotebookRequest(BaseModel):
     api_key: str
     model: Optional[str] = GEMINI_NOTEBOOK_MODEL
+    generation_goal: str = "teaching"
+    compute_profile: str = "balanced"
+    include_study_questions: bool = True
+    include_reproducibility_checklist: bool = True
+    include_risk_notes: bool = True
 
 
 # ─────────────────────────────────────────────
@@ -932,6 +885,72 @@ def _build_notebook_from_cells(cells: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _normalize_string_list(values: Any, *, fallback: Optional[List[str]] = None, limit: int = 8) -> List[str]:
+    items = values if isinstance(values, list) else fallback or []
+    cleaned: List[str] = []
+    for item in items[:limit]:
+        text = str(item or "").strip()
+        if text:
+            cleaned.append(text)
+    return cleaned
+
+
+def _append_lab_pack_cells(
+    cells: List[Dict[str, Any]],
+    *,
+    study_questions: List[str],
+    reproducibility_checklist: List[str],
+    risk_notes: List[str],
+) -> List[Dict[str, Any]]:
+    enriched = list(cells)
+    if study_questions:
+        enriched.append(
+            {
+                "cell_type": "markdown",
+                "source": "## Study Questions\n\n" + "\n".join(f"{idx + 1}. {question}" for idx, question in enumerate(study_questions)),
+            }
+        )
+    if reproducibility_checklist:
+        enriched.append(
+            {
+                "cell_type": "markdown",
+                "source": "## Reproducibility Checklist\n\n" + "\n".join(f"- [ ] {item}" for item in reproducibility_checklist),
+            }
+        )
+    if risk_notes:
+        enriched.append(
+            {
+                "cell_type": "markdown",
+                "source": "## Risk And Assumption Notes\n\n" + "\n".join(f"- {item}" for item in risk_notes),
+            }
+        )
+    return enriched
+
+
+def _build_lab_pack_preview(
+    *,
+    title: str,
+    artifact_summary: List[str],
+    study_questions: List[str],
+    reproducibility_checklist: List[str],
+    risk_notes: List[str],
+    cells: List[Dict[str, Any]],
+) -> str:
+    sections: List[str] = [f"# {title}"]
+    if artifact_summary:
+        sections.append("## Artifact Summary\n\n" + "\n".join(f"- {item}" for item in artifact_summary))
+    if study_questions:
+        sections.append("## Study Questions\n\n" + "\n".join(f"{idx + 1}. {item}" for idx, item in enumerate(study_questions)))
+    if reproducibility_checklist:
+        sections.append("## Reproducibility Checklist\n\n" + "\n".join(f"- [ ] {item}" for item in reproducibility_checklist))
+    if risk_notes:
+        sections.append("## Risk Notes\n\n" + "\n".join(f"- {item}" for item in risk_notes))
+    cell_preview = _gemini_cells_to_preview(cells)
+    if cell_preview:
+        sections.append("## Notebook Preview\n\n" + cell_preview)
+    return "\n\n".join(section for section in sections if section).strip()
+
+
 def _run_gemini_notebook_pipeline(
     *,
     project_id: str,
@@ -939,193 +958,157 @@ def _run_gemini_notebook_pipeline(
     context: Dict[str, Any],
     api_key: str,
     model: str,
-) -> tuple[Dict[str, Any], str, List[str], str, str, str]:
+    generation_goal: str,
+    compute_profile: str,
+    include_study_questions: bool,
+    include_reproducibility_checklist: bool,
+    include_risk_notes: bool,
+) -> tuple[Dict[str, Any], str, List[str], str, str, str, List[str], List[str], List[str], List[str]]:
     pdf_bytes = _load_paper_pdf_bytes(project_id, paper_id, context)
     pdf_part = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
 
     analysis_raw = _call_gemini_with_retry(
         api_key=api_key,
         model=model,
-        system_prompt=GEMINI_NOTEBOOK_SYSTEM_PROMPT,
-        user_content=[pdf_part, GEMINI_ANALYSIS_PROMPT],
+        system_prompt=RESEARCH_LAB_SYSTEM_PROMPT,
+        user_content=[pdf_part, RESEARCH_LAB_ANALYSIS_PROMPT],
         max_tokens=GEMINI_MAX_TOKENS_ANALYSIS,
     )
-    analysis = _parse_llm_json(analysis_raw, "paper_analysis", api_key=api_key, model=model)
+    analysis = _parse_llm_json(analysis_raw, "research_lab_analysis", api_key=api_key, model=model)
 
-    design_prompt = GEMINI_DESIGN_PROMPT_TEMPLATE.format(
-        analysis_json=json.dumps(analysis, indent=2, ensure_ascii=True)
-    )
-    design_raw = _call_gemini_with_retry(
-        api_key=api_key,
-        model=model,
-        system_prompt=GEMINI_NOTEBOOK_SYSTEM_PROMPT,
-        user_content=[pdf_part, design_prompt],
-        max_tokens=GEMINI_MAX_TOKENS_DESIGN,
-    )
-    design = _parse_llm_json(design_raw, "design_plan", api_key=api_key, model=model)
-
-    generate_prompt = GEMINI_GENERATE_PROMPT_TEMPLATE.format(
+    plan_prompt = RESEARCH_LAB_PLAN_PROMPT_TEMPLATE.format(
+        generation_goal=generation_goal,
+        compute_profile=compute_profile,
+        include_study_questions=str(include_study_questions).lower(),
+        include_reproducibility_checklist=str(include_reproducibility_checklist).lower(),
+        include_risk_notes=str(include_risk_notes).lower(),
         analysis_json=json.dumps(analysis, indent=2, ensure_ascii=True),
-        design_json=json.dumps(design, indent=2, ensure_ascii=True),
     )
-    cells_raw = _call_gemini_with_retry(
+    plan_raw = _call_gemini_with_retry(
         api_key=api_key,
         model=model,
-        system_prompt=GEMINI_NOTEBOOK_SYSTEM_PROMPT,
+        system_prompt=RESEARCH_LAB_SYSTEM_PROMPT,
+        user_content=[pdf_part, plan_prompt],
+        max_tokens=GEMINI_MAX_TOKENS_PLAN,
+    )
+    plan = _parse_llm_json(plan_raw, "research_lab_plan", api_key=api_key, model=model)
+
+    generate_prompt = RESEARCH_LAB_GENERATE_PROMPT_TEMPLATE.format(
+        generation_goal=generation_goal,
+        compute_profile=compute_profile,
+        include_study_questions=str(include_study_questions).lower(),
+        include_reproducibility_checklist=str(include_reproducibility_checklist).lower(),
+        include_risk_notes=str(include_risk_notes).lower(),
+        analysis_json=json.dumps(analysis, indent=2, ensure_ascii=True),
+        plan_json=json.dumps(plan, indent=2, ensure_ascii=True),
+    )
+    draft_raw = _call_gemini_with_retry(
+        api_key=api_key,
+        model=model,
+        system_prompt=RESEARCH_LAB_SYSTEM_PROMPT,
         user_content=[pdf_part, generate_prompt],
         max_tokens=GEMINI_MAX_TOKENS_GENERATE,
     )
-    cells = _parse_llm_json(cells_raw, "generate_cells", api_key=api_key, model=model)
-    if not isinstance(cells, list) or not cells:
-        raise ValueError("Gemini did not return a valid notebook cell list.")
+    draft = _parse_llm_json(draft_raw, "research_lab_draft", api_key=api_key, model=model)
+    if not isinstance(draft, dict):
+        raise ValueError("Gemini did not return a valid Research Lab Pack payload.")
 
-    validate_prompt = GEMINI_VALIDATE_PROMPT_TEMPLATE.format(
-        cells_json=json.dumps(cells, indent=2, ensure_ascii=True)
+    review_prompt = RESEARCH_LAB_REVIEW_PROMPT_TEMPLATE.format(
+        draft_json=json.dumps(draft, indent=2, ensure_ascii=True)
     )
-    validated_raw = _call_gemini_with_retry(
+    reviewed_raw = _call_gemini_with_retry(
         api_key=api_key,
         model=model,
-        system_prompt=GEMINI_NOTEBOOK_SYSTEM_PROMPT,
-        user_content=[validate_prompt],
-        max_tokens=GEMINI_MAX_TOKENS_VALIDATE,
+        system_prompt=RESEARCH_LAB_SYSTEM_PROMPT,
+        user_content=[review_prompt],
+        max_tokens=GEMINI_MAX_TOKENS_REVIEW,
     )
-    validated_cells = _parse_llm_json(validated_raw, "validate_cells", api_key=api_key, model=model)
-    if not isinstance(validated_cells, list) or not validated_cells:
-        validated_cells = cells
+    reviewed = _parse_llm_json(reviewed_raw, "research_lab_review", api_key=api_key, model=model)
+    if not isinstance(reviewed, dict):
+        reviewed = draft
 
-    notebook = _build_notebook_from_cells(validated_cells)
+    raw_cells = reviewed.get("cells") if isinstance(reviewed, dict) else None
+    if not isinstance(raw_cells, list) or not raw_cells:
+        raise ValueError("Gemini did not return a valid notebook cell list.")
+
+    artifact_summary = _normalize_string_list(
+        reviewed.get("artifact_summary"),
+        fallback=_normalize_string_list((plan or {}).get("artifact_summary"), limit=4),
+        limit=6,
+    )
+    study_questions = _normalize_string_list(
+        reviewed.get("study_questions"),
+        fallback=["What is the paper's main claim?", "Which part of the notebook is the biggest approximation?"],
+        limit=6,
+    ) if include_study_questions else []
+    reproducibility_checklist = _normalize_string_list(
+        reviewed.get("reproducibility_checklist"),
+        fallback=_normalize_string_list((analysis or {}).get("implementation_hazards"), limit=6),
+        limit=8,
+    ) if include_reproducibility_checklist else []
+    risk_notes = _normalize_string_list(
+        reviewed.get("risk_notes"),
+        fallback=["Treat the generated code as an educational reconstruction, not a verified reproduction."],
+        limit=8,
+    ) if include_risk_notes else []
+
+    enriched_cells = _append_lab_pack_cells(
+        raw_cells,
+        study_questions=study_questions,
+        reproducibility_checklist=reproducibility_checklist,
+        risk_notes=risk_notes,
+    )
+
+    notebook = _build_notebook_from_cells(enriched_cells)
     notebook["metadata"]["paper_metadata"] = {
         "paper_id": paper_id,
         "source_url": context.get("source_url") or "",
         "generated_with_model": model,
+        "generation_goal": generation_goal,
+        "compute_profile": compute_profile,
     }
     notebook_json = json.dumps(notebook, indent=2)
-    title = str((analysis.get("title") if isinstance(analysis, dict) else None) or context["title"])
-    preview_markdown = _gemini_cells_to_preview(validated_cells)
+    title = str(
+        (reviewed.get("title") if isinstance(reviewed, dict) else None)
+        or (analysis.get("paper_title") if isinstance(analysis, dict) else None)
+        or context["title"]
+    )
+    preview_markdown = _build_lab_pack_preview(
+        title=title,
+        artifact_summary=artifact_summary,
+        study_questions=study_questions,
+        reproducibility_checklist=reproducibility_checklist,
+        risk_notes=risk_notes,
+        cells=enriched_cells,
+    )
     dependencies = _detect_dependencies_from_code(
         *[
             str(cell.get("source") or "")
-            for cell in validated_cells
+            for cell in enriched_cells
             if (cell.get("cell_type") or "") == "code"
         ]
     )
-    file_name = f"{re.sub(r'[^A-Za-z0-9._-]+', '_', title).strip('_') or paper_id}.ipynb"
-    return notebook, notebook_json, dependencies, preview_markdown, file_name, title
-
-
-def _fallback_notebook_blueprint(context: Dict[str, Any]) -> NotebookBlueprint:
-    title = context["title"]
-    excerpt = textwrap.shorten(context["paper_text"], width=1200, placeholder="...")
-    equations = context.get("equation_candidates") or []
-    equations_md = "No equations were extracted confidently from the paper text.\n"
-    if equations:
-        equations_md = "\n".join(f"- `{equation}`" for equation in equations)
-
-    return NotebookBlueprint(
-        title=title,
-        overview_markdown=(
-            f"### Abstract\n\nThis notebook is a grounded study scaffold for **{title}**.\n\n"
-            f"Key excerpt from the paper:\n\n> {excerpt}"
-        ),
-        methodology_markdown=(
-            "### Methodology\n\n"
-            "The full implementation details could not be structured automatically, so this notebook provides "
-            "a compact educational approximation with CPU-friendly PyTorch code."
-        ),
-        equations_markdown=f"### Equations\n\n{equations_md}",
-        implementation_markdown=(
-            "### Implementation Notes\n\n"
-            "The code below focuses on a reduced-scale reference implementation suitable for local execution."
-        ),
-        experiment_markdown=(
-            "### Experiments\n\n"
-            "A toy experiment is included so the notebook runs end-to-end even when the original dataset is unavailable."
-        ),
-        conclusion_markdown=(
-            "### Conclusion\n\n"
-            "Review the generated implementation critically before using it for serious research claims."
-        ),
-        assumptions_markdown=(
-            "### Assumptions\n\n"
-            "- Full reproduction was not possible from the extracted context alone.\n"
-            "- The notebook uses small synthetic data and reduced dimensions for CPU execution."
-        ),
-        dependencies=["torch", "numpy", "matplotlib"],
-        setup_code=(
-            "import math\nimport random\nimport numpy as np\nimport torch\n"
-            "import torch.nn as nn\nimport matplotlib.pyplot as plt\n\n"
-            "torch.manual_seed(42)\nrandom.seed(42)\nnp.random.seed(42)\n"
-            "device = torch.device('cpu')\n"
-        ),
-        implementation_code=(
-            "class TinyResearchModel(nn.Module):\n"
-            "    def __init__(self, input_dim: int = 16, hidden_dim: int = 32, output_dim: int = 16):\n"
-            "        super().__init__()\n"
-            "        self.net = nn.Sequential(\n"
-            "            nn.Linear(input_dim, hidden_dim),\n"
-            "            nn.ReLU(),\n"
-            "            nn.Linear(hidden_dim, output_dim),\n"
-            "        )\n\n"
-            "    def forward(self, x: torch.Tensor) -> torch.Tensor:\n"
-            "        return self.net(x)\n\n"
-            "model = TinyResearchModel().to(device)\n"
-            "model\n"
-        ),
-        experiment_code=(
-            "x = torch.randn(128, 16)\n"
-            "target = torch.randn(128, 16)\n"
-            "optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)\n"
-            "criterion = nn.MSELoss()\n"
-            "loss_history = []\n\n"
-            "for step in range(60):\n"
-            "    optimizer.zero_grad()\n"
-            "    pred = model(x)\n"
-            "    loss = criterion(pred, target)\n"
-            "    loss.backward()\n"
-            "    optimizer.step()\n"
-            "    loss_history.append(float(loss.item()))\n\n"
-            "plt.plot(loss_history)\n"
-            "plt.title('Training loss')\n"
-            "plt.xlabel('Step')\n"
-            "plt.ylabel('Loss')\n"
-            "plt.show()\n"
-        ),
-    )
-
-
-async def _generate_notebook_blueprint(context: Dict[str, Any]) -> NotebookBlueprint:
-    prompt = (
-        "Create a grounded, executable Jupyter notebook blueprint for ONE research paper.\n"
-        "Return a JSON object that matches the provided schema.\n\n"
-        "Requirements:\n"
-        "- The notebook must be CPU-friendly and runnable locally.\n"
-        "- Use PyTorch for the implementation.\n"
-        "- Use toy or synthetic data when the paper's dataset is unavailable.\n"
-        "- Keep dependencies minimal and realistic.\n"
-        "- Include markdown sections for Abstract, Methodology, Equations, Implementation, Experiments, Conclusion, and Assumptions.\n"
-        "- Equations markdown should use LaTeX when possible.\n"
-        "- Be honest about missing details; put approximations in assumptions.\n"
-        "- Do not use code fences in code fields.\n\n"
-        f"Paper title: {context['title']}\n"
-        f"Authors: {', '.join(context.get('authors') or [])}\n"
-        f"Published: {context.get('published') or 'Unknown'}\n"
-        f"Source URL: {context.get('source_url') or 'Unavailable'}\n"
-        f"Equation candidates:\n{json.dumps(context.get('equation_candidates') or [], ensure_ascii=True)}\n\n"
-        f"Paper excerpt:\n{context['paper_text']}"
-    )
-
-    try:
-        structured_llm = get_structured_llm("notebook_codegen", max_tokens=3200).with_structured_output(
-            NotebookBlueprint,
-            method="json_schema",
+    dependencies = list(
+        dict.fromkeys(
+            [
+                *(_normalize_string_list((reviewed or {}).get("dependencies"), limit=12)),
+                *dependencies,
+            ]
         )
-        result = await structured_llm.ainvoke(prompt)
-        if isinstance(result, NotebookBlueprint):
-            return result
-        return NotebookBlueprint.model_validate(result)
-    except Exception as exc:
-        logger.warning("Notebook blueprint generation failed for %s: %s", context["paper_id"], exc)
-        return _fallback_notebook_blueprint(context)
+    )
+    file_name = f"{re.sub(r'[^A-Za-z0-9._-]+', '_', title).strip('_') or paper_id}.ipynb"
+    return (
+        notebook,
+        notebook_json,
+        dependencies,
+        preview_markdown,
+        file_name,
+        title,
+        artifact_summary,
+        study_questions,
+        reproducibility_checklist,
+        risk_notes,
+    )
 
 
 def _markdown_cell(source: str) -> Dict[str, Any]:
@@ -1140,103 +1123,6 @@ def _code_cell(source: str) -> Dict[str, Any]:
         "outputs": [],
         "source": source,
     }
-
-
-def _build_install_cell(dependencies: List[str]) -> str:
-    if not dependencies:
-        dependencies = ["torch", "numpy", "matplotlib"]
-    return "%%capture\n%pip install -q " + " ".join(dependencies)
-
-
-def _build_notebook_preview(blueprint: NotebookBlueprint, source_url: str) -> str:
-    link_line = f"Source: [{source_url}]({source_url})\n\n" if source_url else ""
-    return (
-        f"## {blueprint.title}\n\n"
-        f"{link_line}"
-        f"{blueprint.overview_markdown}\n\n"
-        f"{blueprint.methodology_markdown}\n\n"
-        f"{blueprint.equations_markdown}\n\n"
-        f"{blueprint.implementation_markdown}\n\n"
-        f"{blueprint.experiment_markdown}\n\n"
-        f"{blueprint.conclusion_markdown}\n\n"
-        f"{blueprint.assumptions_markdown}"
-    ).strip()
-
-
-def _build_generated_notebook(
-    context: Dict[str, Any],
-    blueprint: NotebookBlueprint,
-) -> tuple[Dict[str, Any], str, List[str], str]:
-    setup_code = _clean_model_block(blueprint.setup_code)
-    implementation_code = _clean_model_block(blueprint.implementation_code)
-    experiment_code = _clean_model_block(blueprint.experiment_code)
-
-    dependencies = [
-        dep for dep in (
-            _normalize_dependency_name(item)
-            for item in [*blueprint.dependencies, *_detect_dependencies_from_code(setup_code, implementation_code, experiment_code)]
-        )
-        if dep
-    ]
-    dependencies = list(dict.fromkeys(dependencies))
-
-    preview_markdown = _build_notebook_preview(blueprint, context.get("source_url") or "")
-    title = blueprint.title or context["title"]
-    source_url = context.get("source_url") or ""
-
-    notebook = {
-        "cells": [
-            _markdown_cell(
-                f"# {title}\n\n"
-                "Generated as a **Colab-ready**, CPU-friendly research notebook.\n\n"
-                + (f"[Open source paper]({source_url})\n\n" if source_url else "")
-                + f"Paper chunks used: {context.get('chunk_count', 0)}"
-            ),
-            _markdown_cell(
-                "## Notebook Features\n\n"
-                "- Reduced-scale **PyTorch** implementation for CPU execution\n"
-                "- Structured sections for abstract, methods, equations, experiments, and conclusion\n"
-                "- Auto-detected dependency install cell\n"
-                "- Ready to download as `.ipynb` and upload into Google Colab"
-            ),
-            _code_cell(_build_install_cell(dependencies)),
-            _markdown_cell(blueprint.overview_markdown),
-            _markdown_cell(blueprint.methodology_markdown),
-            _markdown_cell(blueprint.equations_markdown),
-            _markdown_cell(blueprint.implementation_markdown),
-            _code_cell(setup_code),
-            _code_cell(implementation_code),
-            _markdown_cell(blueprint.experiment_markdown),
-            _code_cell(experiment_code),
-            _markdown_cell(f"{blueprint.conclusion_markdown}\n\n{blueprint.assumptions_markdown}"),
-        ],
-        "metadata": {
-            "kernelspec": {
-                "display_name": "Python 3",
-                "language": "python",
-                "name": "python3",
-            },
-            "language_info": {
-                "name": "python",
-                "pygments_lexer": "ipython3",
-            },
-            "colab": {
-                "name": re.sub(r'[^A-Za-z0-9._-]+', '_', title).strip("_") or "research_notebook",
-                "provenance": [],
-                "include_colab_link": True,
-            },
-            "paper_metadata": {
-                "paper_id": context["paper_id"],
-                "source_url": source_url,
-                "generated_with_model": get_model_name("notebook_codegen"),
-            },
-        },
-        "nbformat": 4,
-        "nbformat_minor": 5,
-    }
-    notebook_json = json.dumps(notebook, indent=2)
-    file_name = f"{re.sub(r'[^A-Za-z0-9._-]+', '_', title).strip('_') or context['paper_id']}.ipynb"
-    return notebook, notebook_json, dependencies, file_name
 
 
 # ─────────────────────────────────────────────
@@ -1452,13 +1338,18 @@ async def generate_paper_notebook(project_id: str, paper_id: str, request: Gener
         raise HTTPException(status_code=500, detail=f"Failed to prepare notebook context: {str(exc)}") from exc
 
     try:
-        notebook, notebook_json, dependencies, preview_markdown, file_name, title = await _run_blocking(
+        notebook, notebook_json, dependencies, preview_markdown, file_name, title, artifact_summary, study_questions, reproducibility_checklist, risk_notes = await _run_blocking(
             _run_gemini_notebook_pipeline,
             project_id=project_id,
             paper_id=paper_id,
             context=context,
             api_key=request.api_key.strip(),
             model=(request.model or GEMINI_NOTEBOOK_MODEL).strip() or GEMINI_NOTEBOOK_MODEL,
+            generation_goal=request.generation_goal.strip() or "teaching",
+            compute_profile=request.compute_profile.strip() or "balanced",
+            include_study_questions=request.include_study_questions,
+            include_reproducibility_checklist=request.include_reproducibility_checklist,
+            include_risk_notes=request.include_risk_notes,
         )
         return GenerateNotebookResponse(
             status="success",
@@ -1472,6 +1363,12 @@ async def generate_paper_notebook(project_id: str, paper_id: str, request: Gener
             source_url=context.get("source_url") or None,
             generated_with_model=(request.model or GEMINI_NOTEBOOK_MODEL).strip() or GEMINI_NOTEBOOK_MODEL,
             colab_ready=True,
+            artifact_summary=artifact_summary,
+            study_questions=study_questions,
+            reproducibility_checklist=reproducibility_checklist,
+            risk_notes=risk_notes,
+            generation_goal=request.generation_goal.strip() or "teaching",
+            compute_profile=request.compute_profile.strip() or "balanced",
         )
     except HTTPException:
         raise
@@ -1820,3 +1717,4 @@ async def remove_paper(request: RemovePaperRequest):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, log_level="info")
+

@@ -118,35 +118,34 @@ class MainApiTests(unittest.TestCase):
         self.assertEqual(paper["authors"], ["Komal Sharma"])
         self.assertEqual(paper["abs_url"], "https://example.com/paper")
 
-    def test_build_generated_notebook_includes_colab_metadata(self) -> None:
-        context = {
-            "paper_id": "p1",
-            "title": "Attention Is All You Need",
-            "source_url": "https://arxiv.org/abs/1706.03762",
-            "chunk_count": 12,
-        }
-        blueprint = main.NotebookBlueprint(
-            title="Attention Is All You Need",
-            overview_markdown="### Abstract\nTransformer overview",
-            methodology_markdown="### Methodology\nSelf-attention",
-            equations_markdown="### Equations\n$$Attention(Q,K,V)$$",
-            implementation_markdown="### Implementation\nCPU-safe notes",
-            experiment_markdown="### Experiments\nToy run",
-            conclusion_markdown="### Conclusion\nDone",
-            assumptions_markdown="### Assumptions\nEducational approximation",
-            dependencies=["torch", "matplotlib"],
-            setup_code="import torch",
-            implementation_code="model = torch.nn.Linear(4, 4)",
-            experiment_code="print('ok')",
+    def test_append_lab_pack_cells_adds_companion_sections(self) -> None:
+        cells = [{"cell_type": "markdown", "source": "# Intro"}]
+        enriched = main._append_lab_pack_cells(
+            cells,
+            study_questions=["What is the key idea?"],
+            reproducibility_checklist=["Verify preprocessing"],
+            risk_notes=["Uses a reduced-scale setup"],
         )
 
-        notebook, notebook_json, dependencies, file_name = main._build_generated_notebook(context, blueprint)
+        self.assertEqual(len(enriched), 4)
+        self.assertIn("Study Questions", enriched[1]["source"])
+        self.assertIn("Reproducibility Checklist", enriched[2]["source"])
+        self.assertIn("Risk And Assumption Notes", enriched[3]["source"])
 
-        self.assertEqual(notebook["metadata"]["colab"]["include_colab_link"], True)
-        self.assertIn("%pip install", notebook["cells"][2]["source"])
-        self.assertIn("torch", dependencies)
-        self.assertTrue(file_name.endswith(".ipynb"))
-        self.assertIn("Attention Is All You Need", notebook_json)
+    def test_build_lab_pack_preview_includes_summary_and_preview(self) -> None:
+        preview = main._build_lab_pack_preview(
+            title="Attention Is All You Need",
+            artifact_summary=["Explains the Transformer architecture"],
+            study_questions=["Why does self-attention help?"],
+            reproducibility_checklist=["Check tokenization"],
+            risk_notes=["Educational approximation only"],
+            cells=[{"cell_type": "code", "source": "print('ok')"}],
+        )
+
+        self.assertIn("# Attention Is All You Need", preview)
+        self.assertIn("Artifact Summary", preview)
+        self.assertIn("Study Questions", preview)
+        self.assertIn("```python", preview)
 
     def test_generate_paper_notebook_endpoint_returns_notebook_payload(self) -> None:
         context = {
@@ -168,10 +167,22 @@ class MainApiTests(unittest.TestCase):
                  "## Attention Is All You Need",
                  "Attention_Is_All_You_Need.ipynb",
                  "Attention Is All You Need",
+                 ["Readable summary"],
+                 ["Question one"],
+                 ["Check one"],
+                 ["Risk one"],
              )):
             response = self.client.post(
                 "/projects/demo/papers/p1/generate-notebook",
-                json={"api_key": "test-gemini-key", "model": "gemini-2.5-pro"},
+                json={
+                    "api_key": "test-gemini-key",
+                    "model": "gemini-2.5-pro",
+                    "generation_goal": "replication",
+                    "compute_profile": "cpu_light",
+                    "include_study_questions": True,
+                    "include_reproducibility_checklist": True,
+                    "include_risk_notes": True,
+                },
             )
 
         self.assertEqual(response.status_code, 200)
@@ -180,6 +191,10 @@ class MainApiTests(unittest.TestCase):
         self.assertEqual(data["paper_id"], "p1")
         self.assertEqual(data["generated_with_model"], "gemini-2.5-pro")
         self.assertTrue(data["colab_ready"])
+        self.assertEqual(data["generation_goal"], "replication")
+        self.assertEqual(data["compute_profile"], "cpu_light")
+        self.assertEqual(data["artifact_summary"], ["Readable summary"])
+        self.assertEqual(data["study_questions"], ["Question one"])
 
     def test_generate_paper_notebook_endpoint_rejects_metadata_only_entries(self) -> None:
         with patch.object(main, "_prepare_notebook_context", side_effect=ValueError("Notebook generation requires a full-text paper in your library, not a metadata-only entry.")):

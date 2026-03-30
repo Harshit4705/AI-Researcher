@@ -105,11 +105,22 @@ type NotebookResponse = {
   source_url?: string;
   generated_with_model: string;
   colab_ready: boolean;
+  artifact_summary: string[];
+  study_questions: string[];
+  reproducibility_checklist: string[];
+  risk_notes: string[];
+  generation_goal: string;
+  compute_profile: string;
 };
 
 type GenerateNotebookRequest = {
   api_key: string;
   model: string;
+  generation_goal: string;
+  compute_profile: string;
+  include_study_questions: boolean;
+  include_reproducibility_checklist: boolean;
+  include_risk_notes: boolean;
 };
 
 type ApiError = {
@@ -226,6 +237,11 @@ export default function HomePage() {
   const [selectedNotebookPaper, setSelectedNotebookPaper] = useState<LibraryItem | null>(null);
   const [geminiApiKey, setGeminiApiKey] = useState("");
   const [geminiModel, setGeminiModel] = useState("gemini-2.5-pro");
+  const [notebookGoal, setNotebookGoal] = useState("teaching");
+  const [computeProfile, setComputeProfile] = useState("balanced");
+  const [includeStudyQuestions, setIncludeStudyQuestions] = useState(true);
+  const [includeReproChecklist, setIncludeReproChecklist] = useState(true);
+  const [includeRiskNotes, setIncludeRiskNotes] = useState(true);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const chatRef = useRef<HTMLDivElement | null>(null);
@@ -237,6 +253,11 @@ export default function HomePage() {
     if (typeof window !== "undefined") {
       setGeminiApiKey(localStorage.getItem("ai_researcher_gemini_api_key") || "");
       setGeminiModel(localStorage.getItem("ai_researcher_gemini_model") || "gemini-2.5-pro");
+      setNotebookGoal(localStorage.getItem("ai_researcher_notebook_goal") || "teaching");
+      setComputeProfile(localStorage.getItem("ai_researcher_compute_profile") || "balanced");
+      setIncludeStudyQuestions(localStorage.getItem("ai_researcher_study_questions") !== "false");
+      setIncludeReproChecklist(localStorage.getItem("ai_researcher_repro_checklist") !== "false");
+      setIncludeRiskNotes(localStorage.getItem("ai_researcher_risk_notes") !== "false");
     }
   }, []);
 
@@ -250,8 +271,13 @@ export default function HomePage() {
     if (typeof window !== "undefined") {
       localStorage.setItem("ai_researcher_gemini_api_key", geminiApiKey);
       localStorage.setItem("ai_researcher_gemini_model", geminiModel);
+      localStorage.setItem("ai_researcher_notebook_goal", notebookGoal);
+      localStorage.setItem("ai_researcher_compute_profile", computeProfile);
+      localStorage.setItem("ai_researcher_study_questions", String(includeStudyQuestions));
+      localStorage.setItem("ai_researcher_repro_checklist", String(includeReproChecklist));
+      localStorage.setItem("ai_researcher_risk_notes", String(includeRiskNotes));
     }
-  }, [geminiApiKey, geminiModel]);
+  }, [geminiApiKey, geminiModel, notebookGoal, computeProfile, includeStudyQuestions, includeReproChecklist, includeRiskNotes]);
 
   async function refreshProjectData(activeProjectId: string) {
     const [papersResponse, statsResponse] = await Promise.all([
@@ -499,6 +525,11 @@ export default function HomePage() {
       const payload: GenerateNotebookRequest = {
         api_key: geminiApiKey.trim(),
         model: geminiModel.trim() || "gemini-2.5-pro",
+        generation_goal: notebookGoal,
+        compute_profile: computeProfile,
+        include_study_questions: includeStudyQuestions,
+        include_reproducibility_checklist: includeReproChecklist,
+        include_risk_notes: includeRiskNotes,
       };
       const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/papers/${encodeURIComponent(selectedNotebookPaper.id)}/generate-notebook`, {
         method: "POST",
@@ -517,7 +548,7 @@ export default function HomePage() {
         {
           id: generateMsgId(),
           role: "assistant",
-          content: `✅ Built a runnable notebook for **"${selectedNotebookPaper.title}"** with **${data.generated_with_model}**. You can preview it now and download the \`.ipynb\` file.`,
+          content: `✅ Built a Research Lab Pack for **"${selectedNotebookPaper.title}"** with **${data.generated_with_model}**. Goal: **${data.generation_goal}**. You can preview the notebook, study questions, and reproducibility notes now.`,
           ts: nowLabel(),
         },
       ]);
@@ -1040,13 +1071,13 @@ export default function HomePage() {
                   {isGeneratingNotebook ? <Loader2 className="h-5 w-5 animate-spin" /> : <Cpu className="h-5 w-5" />}
                 </div>
                 <div>
-                  <h2 className="text-lg font-bold text-white">Paper to Notebook</h2>
+                  <h2 className="text-lg font-bold text-white">Research Lab Pack</h2>
                   <p className="text-xs text-zinc-400">
                     {generatedNotebook
                       ? `Generated with ${generatedNotebook.generated_with_model}`
                       : selectedNotebookPaper
                         ? `Selected paper: ${selectedNotebookPaper.title}`
-                        : "Transforming your selected paper into a runnable notebook"}
+                        : "Transforming your selected paper into a notebook, study guide, and reproducibility pack"}
                   </p>
                 </div>
               </div>
@@ -1064,6 +1095,46 @@ export default function HomePage() {
             <div className="flex-1 overflow-y-auto p-6 space-y-4">
               {generatedNotebook ? (
                 <div className="prose prose-invert prose-indigo max-w-none text-sm leading-relaxed prose-headings:text-indigo-300 prose-headings:font-bold prose-a:text-indigo-400 hover:prose-a:text-indigo-300 prose-p:text-white/80 prose-li:text-white/80 prose-table:border-collapse prose-th:border prose-th:border-zinc-700 prose-th:bg-zinc-800 prose-th:px-3 prose-th:py-2 prose-td:border prose-td:border-zinc-800 prose-td:px-3 prose-td:py-2">
+                  <div className="mb-5 grid gap-3 md:grid-cols-2 not-prose">
+                    <div className="rounded-2xl border border-indigo-500/20 bg-indigo-500/10 p-4">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-indigo-200">Generation Profile</p>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-100">
+                          Goal: {generatedNotebook.generation_goal}
+                        </span>
+                        <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-100">
+                          Compute: {generatedNotebook.compute_profile}
+                        </span>
+                      </div>
+                      {generatedNotebook.artifact_summary.length > 0 && (
+                        <ul className="mt-3 space-y-2 text-sm text-zinc-200">
+                          {generatedNotebook.artifact_summary.map((item) => (
+                            <li key={item} className="flex gap-2">
+                              <span className="mt-1 h-1.5 w-1.5 rounded-full bg-indigo-300" />
+                              <span>{item}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Companion Outputs</p>
+                      <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+                        <div className="rounded-xl bg-black/25 px-2 py-3">
+                          <div className="text-lg font-semibold text-white">{generatedNotebook.study_questions.length}</div>
+                          <div className="text-[10px] uppercase tracking-wide text-zinc-500">questions</div>
+                        </div>
+                        <div className="rounded-xl bg-black/25 px-2 py-3">
+                          <div className="text-lg font-semibold text-white">{generatedNotebook.reproducibility_checklist.length}</div>
+                          <div className="text-[10px] uppercase tracking-wide text-zinc-500">checks</div>
+                        </div>
+                        <div className="rounded-xl bg-black/25 px-2 py-3">
+                          <div className="text-lg font-semibold text-white">{generatedNotebook.risk_notes.length}</div>
+                          <div className="text-[10px] uppercase tracking-wide text-zinc-500">notes</div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                   <div className="mb-5 flex flex-wrap gap-2">
                     {generatedNotebook.dependencies.map((dependency) => (
                       <span key={dependency} className="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-indigo-200">
@@ -1076,7 +1147,7 @@ export default function HomePage() {
               ) : isGeneratingNotebook ? (
                 <div className="flex flex-col items-center justify-center h-full text-zinc-500 space-y-4">
                   <Loader2 className="h-8 w-8 animate-spin text-indigo-500/50" />
-                  <p className="animate-pulse">Gemini 2.5 Pro is analyzing the PDF and building a Colab-ready notebook...</p>
+                  <p className="animate-pulse">Gemini 2.5 Pro is analyzing the PDF and building your Research Lab Pack...</p>
                 </div>
               ) : notebookError ? (
                 <div className="space-y-4">
@@ -1093,8 +1164,18 @@ export default function HomePage() {
                     selectedPaper={selectedNotebookPaper}
                     geminiApiKey={geminiApiKey}
                     geminiModel={geminiModel}
+                    notebookGoal={notebookGoal}
+                    computeProfile={computeProfile}
+                    includeStudyQuestions={includeStudyQuestions}
+                    includeReproChecklist={includeReproChecklist}
+                    includeRiskNotes={includeRiskNotes}
                     onApiKeyChange={setGeminiApiKey}
                     onModelChange={setGeminiModel}
+                    onGoalChange={setNotebookGoal}
+                    onComputeProfileChange={setComputeProfile}
+                    onIncludeStudyQuestionsChange={setIncludeStudyQuestions}
+                    onIncludeReproChecklistChange={setIncludeReproChecklist}
+                    onIncludeRiskNotesChange={setIncludeRiskNotes}
                   />
                 </div>
               ) : (
@@ -1102,8 +1183,18 @@ export default function HomePage() {
                   selectedPaper={selectedNotebookPaper}
                   geminiApiKey={geminiApiKey}
                   geminiModel={geminiModel}
+                  notebookGoal={notebookGoal}
+                  computeProfile={computeProfile}
+                  includeStudyQuestions={includeStudyQuestions}
+                  includeReproChecklist={includeReproChecklist}
+                  includeRiskNotes={includeRiskNotes}
                   onApiKeyChange={setGeminiApiKey}
                   onModelChange={setGeminiModel}
+                  onGoalChange={setNotebookGoal}
+                  onComputeProfileChange={setComputeProfile}
+                  onIncludeStudyQuestionsChange={setIncludeStudyQuestions}
+                  onIncludeReproChecklistChange={setIncludeReproChecklist}
+                  onIncludeRiskNotesChange={setIncludeRiskNotes}
                 />
               )}
             </div>
@@ -1156,24 +1247,45 @@ function NotebookSetupCard({
   selectedPaper,
   geminiApiKey,
   geminiModel,
+  notebookGoal,
+  computeProfile,
+  includeStudyQuestions,
+  includeReproChecklist,
+  includeRiskNotes,
   onApiKeyChange,
   onModelChange,
+  onGoalChange,
+  onComputeProfileChange,
+  onIncludeStudyQuestionsChange,
+  onIncludeReproChecklistChange,
+  onIncludeRiskNotesChange,
 }: {
   selectedPaper: LibraryItem | null;
   geminiApiKey: string;
   geminiModel: string;
+  notebookGoal: string;
+  computeProfile: string;
+  includeStudyQuestions: boolean;
+  includeReproChecklist: boolean;
+  includeRiskNotes: boolean;
   onApiKeyChange: (value: string) => void;
   onModelChange: (value: string) => void;
+  onGoalChange: (value: string) => void;
+  onComputeProfileChange: (value: string) => void;
+  onIncludeStudyQuestionsChange: (value: boolean) => void;
+  onIncludeReproChecklistChange: (value: boolean) => void;
+  onIncludeRiskNotesChange: (value: boolean) => void;
 }) {
   return (
     <div className="space-y-5">
       <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">Notebook Generation</p>
+        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">Research Lab Pack</p>
         <h3 className="mt-2 text-lg font-bold text-white">{selectedPaper?.title || "Select a paper"}</h3>
         <p className="mt-2 text-sm text-zinc-300 leading-relaxed">
           This feature uses <span className="font-semibold text-white">Gemini 2.5 Pro</span> on the real paper PDF so it can read equations,
-          structure, and figures more faithfully. Your Gemini key is used only for notebook generation. Chat, search, import, and the rest of the
-          app still stay on Groq exactly as before.
+          structure, and figures more faithfully. Instead of only generating code, it creates a full research lab pack with a runnable notebook,
+          study prompts, and reproducibility guidance. Your Gemini key is used only here. Chat, search, import, and the rest of the
+          app stay on Groq exactly as before.
         </p>
       </div>
 
@@ -1198,6 +1310,47 @@ function NotebookSetupCard({
             className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-white outline-none transition focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/60"
           />
           <p className="mt-2 text-xs text-zinc-400">Recommended: <span className="font-mono text-zinc-200">gemini-2.5-pro</span></p>
+
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <div>
+              <label className="block text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Generation Goal</label>
+              <select
+                value={notebookGoal}
+                onChange={(e) => onGoalChange(e.target.value)}
+                className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-white outline-none transition focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/60"
+              >
+                <option value="teaching">Teaching first</option>
+                <option value="replication">Replication focused</option>
+                <option value="rapid_review">Rapid review</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Compute Profile</label>
+              <select
+                value={computeProfile}
+                onChange={(e) => onComputeProfileChange(e.target.value)}
+                className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-white outline-none transition focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/60"
+              >
+                <option value="balanced">Balanced</option>
+                <option value="cpu_light">CPU light</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-2">
+            <label className="flex items-center gap-3 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-200">
+              <input type="checkbox" checked={includeStudyQuestions} onChange={(e) => onIncludeStudyQuestionsChange(e.target.checked)} />
+              Include study questions
+            </label>
+            <label className="flex items-center gap-3 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-200">
+              <input type="checkbox" checked={includeReproChecklist} onChange={(e) => onIncludeReproChecklistChange(e.target.checked)} />
+              Include reproducibility checklist
+            </label>
+            <label className="flex items-center gap-3 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-200">
+              <input type="checkbox" checked={includeRiskNotes} onChange={(e) => onIncludeRiskNotesChange(e.target.checked)} />
+              Include risk and assumption notes
+            </label>
+          </div>
         </div>
 
         <div className="rounded-2xl border border-indigo-500/20 bg-indigo-500/10 p-4">
@@ -1205,7 +1358,7 @@ function NotebookSetupCard({
           <ol className="mt-3 space-y-3 text-sm text-indigo-50/90">
             <li>1. Open <a className="text-white underline hover:text-indigo-100" href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">Google AI Studio API Keys</a>.</li>
             <li>2. Sign in, create an API key, and copy it.</li>
-            <li>3. Paste it here, keep the model as <span className="font-mono">gemini-2.5-pro</span>, and click <span className="font-semibold">Generate Notebook</span>.</li>
+            <li>3. Paste it here, choose your goal, and click <span className="font-semibold">Generate Notebook</span>.</li>
           </ol>
           <p className="mt-4 text-xs leading-relaxed text-indigo-100/80">
             If a paper was added as metadata-only, re-upload or re-import the full PDF first so Gemini can analyze the actual document.
